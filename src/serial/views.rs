@@ -2,12 +2,10 @@ use eframe::egui;
 
 use super::app::{SendFormat, SerialTool};
 
-pub fn render_main_view(app: &mut SerialTool, ctx: &egui::Context) {
-    egui::CentralPanel::default().show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            render_settings_panel(app, ui);
-            render_communication_panel(app, ui);
-        });
+pub fn render_main_view(app: &mut SerialTool, ctx: &egui::Context, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        render_settings_panel(app, ui);
+        render_communication_panel(app, ui);
     });
 
     render_status_bar(app, ctx);

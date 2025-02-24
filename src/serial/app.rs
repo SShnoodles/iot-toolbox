@@ -112,12 +112,10 @@ impl SerialTool {
             }
         }
     }
-}
 
-impl eframe::App for SerialTool {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    pub fn views(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ctx.set_visuals(egui::Visuals::light());
-        render_main_view(self, ctx);
+        render_main_view(self, ctx, ui);
         self.receive_data();
     }
 }
