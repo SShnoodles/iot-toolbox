@@ -1,7 +1,7 @@
 use eframe::egui;
 use serialport::{self, SerialPort, SerialPortInfo};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use super::utils::{parse_hex_string, bytes_to_hex_string, now_timestamp};
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::{self, Sender};
@@ -72,7 +72,7 @@ impl SerialTool {
                     }
                 };
 
-                self.logs.push(format!("RX {} <- {}", ts, display));
+                self.logs.push(format!("{} RX <- {}", ts, display));
 
                 ctx.request_repaint();
             }
@@ -209,7 +209,7 @@ impl SerialTool {
 
             ui.add_sized(
                 [ui.available_width() - 140.0, 24.0],
-                egui::TextEdit::singleline(&mut self.input_text)
+                egui::TextEdit::multiline(&mut self.input_text)
                     .hint_text(match self.send_format {
                         SendFormat::Hex => "48 65 6C 6C 6F",
                         SendFormat::Ascii => "Hello",
@@ -312,18 +312,22 @@ impl SerialTool {
             SendFormat::Ascii => String::from_utf8_lossy(&bytes).to_string(),
         };
 
-        self.logs.push(format!("TX {} -> {}", ts, display));
+        self.logs.push(format!("{} TX -> {}", ts, display));
     }
 
     pub fn start_read_thread(port: Arc<Mutex<Box<dyn SerialPort>>>, tx: Sender<Vec<u8>>, running: Arc<AtomicBool>) {
         running.store(true, Ordering::SeqCst);
 
         thread::spawn(move || {
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; 256];
+            let mut frame: Vec<u8> = Vec::new();
+
+            // setting timeout
+            let frame_timeout = Duration::from_millis(30);
+            let mut last_recv = Instant::now();
 
             while running.load(Ordering::SeqCst) {
-                let read_len = {
-                    // lock read
+                let n = {
                     let mut port = match port.lock() {
                         Ok(p) => p,
                         Err(_) => break,
@@ -331,21 +335,29 @@ impl SerialTool {
 
                     match port.read(&mut buf) {
                         Ok(n) => n,
-                        Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                            0 // timeout
-                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => 0,
                         Err(_) => break,
                     }
                 };
 
-                if read_len > 0 {
-                    let data = buf[..read_len].to_vec();
-                    if tx.send(data).is_err() {
-                        break;
-                    }
+                if n > 0 {
+                    frame.extend_from_slice(&buf[..n]);
+                    last_recv = Instant::now();
+                    continue;
                 }
 
-                thread::sleep(Duration::from_millis(5));
+                // timeout -> finish
+                if !frame.is_empty() && last_recv.elapsed() >= frame_timeout {
+                    let completed = std::mem::take(&mut frame);
+                    let _ = tx.send(completed);
+                }
+
+                thread::sleep(Duration::from_millis(2));
+            }
+
+            // reissue residual data
+            if !frame.is_empty() {
+                let _ = tx.send(frame);
             }
         });
     }

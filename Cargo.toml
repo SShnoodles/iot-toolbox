@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+chrono = "0.4.43"
 eframe = "0.33.3"
 egui = "0.33.3"
 serialport = "4.8.1"

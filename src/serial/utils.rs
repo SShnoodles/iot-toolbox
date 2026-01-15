@@ -27,18 +27,7 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 }
 
 pub fn now_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use chrono::Local;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap();
-
-    let secs = now.as_secs() % 86400;
-    let millis = now.subsec_millis();
-
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-
-    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, millis)
+    Local::now().format("%H:%M:%S%.3f").to_string()
 }
