@@ -1,20 +1,44 @@
-pub fn hex_to_bytes(hex_str: &str) -> Vec<u8> {
-    let cleaned = hex_str.replace(" ", "");
-    assert!(
-        cleaned.len() % 2 == 0,
-        "Length of the input string in characters must be even"
-    );
+pub fn parse_hex_string(input: &str) -> Result<Vec<u8>, String> {
+    let cleaned: String = input
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect();
 
-    (0..cleaned.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&cleaned[i..i + 2], 16).unwrap())
-        .collect()
+    if cleaned.len() % 2 != 0 {
+        return Err("HEX length must be even".into());
+    }
+
+    let mut bytes = Vec::new();
+    for i in (0..cleaned.len()).step_by(2) {
+        let byte = u8::from_str_radix(&cleaned[i..i + 2], 16)
+            .map_err(|_| "Invalid HEX")?;
+        bytes.push(byte);
+    }
+
+    Ok(bytes)
 }
 
 pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|b| format!("{:02X}", b))
-        .collect::<Vec<String>>()
+        .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub fn now_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap();
+
+    let secs = now.as_secs() % 86400;
+    let millis = now.subsec_millis();
+
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+
+    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, millis)
 }
