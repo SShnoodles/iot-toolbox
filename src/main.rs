@@ -7,7 +7,10 @@ use eframe::egui::{self};
 const APP_FULL: &str = concat!("IoT Toolbox", " ", "V1.0.0");
 
 fn main() {
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]), // 720p
+        ..Default::default()
+    };
     let _ = eframe::run_native(
         APP_FULL,
         options,

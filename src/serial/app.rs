@@ -23,6 +23,7 @@ pub struct SerialTool {
     pub data_bits: serialport::DataBits,
     pub parity: serialport::Parity,
     pub stop_bits: serialport::StopBits,
+    pub flow_control: serialport::FlowControl,
     // Logs
     pub logs: Vec<String>,
     // Input field
@@ -47,6 +48,7 @@ impl SerialTool {
             data_bits: serialport::DataBits::Eight,
             parity: serialport::Parity::None,
             stop_bits: serialport::StopBits::One,
+            flow_control: serialport::FlowControl::None,
             logs: vec![],
             input_text: String::new(),
             status: "Disconnected".to_string(),
@@ -153,7 +155,7 @@ impl SerialTool {
         ui.add_space(6.0);
 
         // -------------------------------
-        // Baud + DataBits + Parity + StopBits
+        // Baud + DataBits + Parity + StopBits + FlowControl
         // -------------------------------
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Baud rate:").strong());
@@ -171,6 +173,8 @@ impl SerialTool {
             ui.radio_value(&mut self.data_bits, serialport::DataBits::Seven, "7");
             ui.radio_value(&mut self.data_bits, serialport::DataBits::Eight, "8");
 
+            ui.separator();
+
             ui.label(egui::RichText::new("Parity:").strong());
             ui.radio_value(&mut self.parity, serialport::Parity::None, "None");
             ui.radio_value(&mut self.parity, serialport::Parity::Odd, "Odd");
@@ -181,6 +185,13 @@ impl SerialTool {
             ui.label(egui::RichText::new("Stop bits:").strong());
             ui.radio_value(&mut self.stop_bits, serialport::StopBits::One, "1");
             ui.radio_value(&mut self.stop_bits, serialport::StopBits::Two, "2");
+
+            ui.separator();
+
+            ui.label(egui::RichText::new("Flow control:").strong());
+            ui.radio_value(&mut self.flow_control, serialport::FlowControl::None, "None");
+            ui.radio_value(&mut self.flow_control, serialport::FlowControl::Software, "Software");
+            ui.radio_value(&mut self.flow_control, serialport::FlowControl::Hardware, "Hardware");
         });
 
         ui.add_space(4.0);
