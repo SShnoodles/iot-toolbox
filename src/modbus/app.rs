@@ -2,8 +2,7 @@ use anyhow::Result;
 use serialport::{DataBits, Parity, StopBits};
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
-use std::sync::mpsc::{Receiver, Sender};
-use tokio_modbus::client::Client;
+use std::sync::mpsc::Receiver;
 use tokio_modbus::prelude::*;
 
 #[derive(PartialEq)]
@@ -18,6 +17,27 @@ pub enum ModbusFunction {
     ReadDiscrete, // 02
     ReadHolding,  // 03
     ReadInput,    // 04
+}
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum DisplayFormat {
+    Signed,
+    Unsigned,
+    Hex,
+    Binary,
+    Long,
+    LongInverse,
+    Float,
+    FloatInverse,
+    Double,
+    DoubleInverse,
+}
+
+pub struct ModbusRow {
+    pub addr: u16,
+    pub raw: Vec<u16>, // original register
+    pub display_format: DisplayFormat,
+    pub display_value: String,
 }
 
 pub struct ModbusTool {
@@ -39,8 +59,8 @@ pub struct ModbusTool {
     pub address: u16,
     pub quantity: u16,
 
-    pub view_rows: usize,       // 10 / 20 / 50
-    pub display_format: String, // DEC / HEX / BIN
+    pub view_rows: usize, // 10 / 20 / 50
+    pub display_format: DisplayFormat,
 
     pub data: Vec<u16>,
 
@@ -81,7 +101,7 @@ impl ModbusTool {
             quantity: 10,
 
             view_rows: 10,
-            display_format: "DEC".to_string(),
+            display_format: DisplayFormat::Signed,
 
             data: Vec::new(),
 
@@ -98,18 +118,14 @@ impl ModbusTool {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             self.ui_connection(ui);
-            ui.separator();
 
             self.ui_slave(ui);
-            ui.separator();
 
             self.ui_view(ui);
-            ui.separator();
 
             self.ui_table(ui);
-            ui.separator();
 
-            self.ui_logs(ui);
+            // self.ui_logs(ui);
         });
 
         if let Some(rx) = &self.rx {
@@ -125,11 +141,12 @@ impl ModbusTool {
 
     fn ui_connection(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label("Connection");
+            ui.label(egui::RichText::new("Connection").strong());
 
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.mode, ModbusMode::Tcp, "TCP");
-                ui.selectable_value(&mut self.mode, ModbusMode::Rtu, "RTU");
+                // TODO
+                // ui.selectable_value(&mut self.mode, ModbusMode::Rtu, "RTU");
             });
 
             ui.separator();
@@ -142,11 +159,17 @@ impl ModbusTool {
             ui.separator();
 
             ui.horizontal(|ui| {
-                if ui.button("Connect").clicked() {
+                if ui
+                    .button(egui::RichText::new("Connect").color(egui::Color32::BLUE))
+                    .clicked()
+                {
                     self.logs.push("Connecting...".into());
                     self.scroll_to_bottom = true;
                 }
-                if ui.button("Disconnect").clicked() {
+                if ui
+                    .button(egui::RichText::new("Disconnect").color(egui::Color32::RED))
+                    .clicked()
+                {
                     self.logs.push("Disconnected".into());
                     self.scroll_to_bottom = true;
                 }
@@ -167,7 +190,7 @@ impl ModbusTool {
     fn ui_rtu(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Port");
-            egui::ComboBox::from_id_source("rtu_port")
+            egui::ComboBox::from_id_salt("rtu_port")
                 .selected_text(
                     self.selected_port
                         .clone()
@@ -195,64 +218,118 @@ impl ModbusTool {
 
     fn ui_slave(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label("Slave");
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("Slave").strong());
 
             ui.horizontal(|ui| {
                 ui.label("Slave ID");
-                ui.add(egui::DragValue::new(&mut self.slave_id).clamp_range(1..=247));
+                ui.add(egui::DragValue::new(&mut self.slave_id).range(1..=247));
 
                 ui.label("Function");
-                egui::ComboBox::from_id_source("func")
+                egui::ComboBox::from_id_salt("func")
                     .selected_text(format!("{:?}", self.function))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut self.function,
                             ModbusFunction::ReadCoils,
-                            "01 Read Coils",
+                            "01 Read Coils(0x)",
+                        );
+                        ui.selectable_value(
+                            &mut self.function,
+                            ModbusFunction::ReadDiscrete,
+                            "02 Read Discrete Inputs(1x)",
                         );
                         ui.selectable_value(
                             &mut self.function,
                             ModbusFunction::ReadHolding,
-                            "03 Read Holding",
+                            "03 Read Holding Registers(4x)",
                         );
                         ui.selectable_value(
                             &mut self.function,
                             ModbusFunction::ReadInput,
-                            "04 Read Input",
+                            "04 Read Input Registers(3x)",
                         );
                     });
-            });
 
-            ui.horizontal(|ui| {
                 ui.label("Address");
                 ui.add(egui::DragValue::new(&mut self.address));
 
                 ui.label("Quantity");
-                ui.add(egui::DragValue::new(&mut self.quantity).clamp_range(1..=125));
+                ui.add(egui::DragValue::new(&mut self.quantity).range(1..=125));
             });
+
+            // ui.horizontal(|ui| {
+            //     ui.label("Address");
+            //     ui.add(egui::DragValue::new(&mut self.address));
+
+            //     ui.label("Quantity");
+            //     ui.add(egui::DragValue::new(&mut self.quantity).range(1..=125));
+            // });
         });
     }
 
     fn ui_view(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label("View");
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("View").strong());
 
             ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Row: ").strong());
                 ui.radio_value(&mut self.view_rows, 10, "10");
                 ui.radio_value(&mut self.view_rows, 20, "20");
                 ui.radio_value(&mut self.view_rows, 50, "50");
 
-                egui::ComboBox::from_id_source("display")
-                    .selected_text(&self.display_format)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.display_format, "DEC".into(), "DEC");
-                        ui.selectable_value(&mut self.display_format, "HEX".into(), "HEX");
-                        ui.selectable_value(&mut self.display_format, "BIN".into(), "BIN");
+                ui.label(egui::RichText::new("Display: ").strong());
+                egui::ComboBox::from_id_salt("display")
+                    .selected_text(self.display_format.label())
+                    .show_ui(ui, |ui: &mut egui::Ui| {
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::Signed,
+                            "Signed",
+                        );
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::Unsigned,
+                            "Unsigned",
+                        );
+                        ui.selectable_value(&mut self.display_format, DisplayFormat::Hex, "Hex");
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::Binary,
+                            "Binary",
+                        );
+                        ui.selectable_value(&mut self.display_format, DisplayFormat::Long, "Long");
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::LongInverse,
+                            "Long Inverse",
+                        );
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::Float,
+                            "Float",
+                        );
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::FloatInverse,
+                            "Float Inverse",
+                        );
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::Double,
+                            "Double",
+                        );
+                        ui.selectable_value(
+                            &mut self.display_format,
+                            DisplayFormat::DoubleInverse,
+                            "Double Inverse",
+                        );
                     });
             });
         });
 
-        ui.horizontal(|ui| {
+        ui.horizontal(|ui: &mut egui::Ui| {
             if ui.button("Read Once").clicked() {
                 self.start_read_once();
             }
@@ -269,9 +346,9 @@ impl ModbusTool {
                     egui::Grid::new("modbus_table")
                         .striped(true)
                         .show(ui, |ui| {
-                            ui.label("Row");
+                            ui.label("Row\\Addr");
                             for i in 0..self.quantity {
-                                ui.label(format!("Addr {}", self.address + i));
+                                ui.label(format!("{}", self.address + i));
                             }
                             ui.end_row();
 
@@ -282,13 +359,8 @@ impl ModbusTool {
                                     let idx = row * self.quantity as usize + col as usize;
                                     let v = self.data.get(idx).copied().unwrap_or(0);
 
-                                    let txt = match self.display_format.as_str() {
-                                        "HEX" => format!("{:04X}", v),
-                                        "BIN" => format!("{:016b}", v),
-                                        _ => v.to_string(),
-                                    };
-
-                                    ui.label(txt);
+                                    let txt = Self::format_value(&[v], self.display_format);
+                                    ui.label(txt.to_string());
                                 }
                                 ui.end_row();
                             }
@@ -390,31 +462,127 @@ impl ModbusTool {
     ) -> Result<Vec<u16>> {
         let socket_addr: SocketAddr = format!("{}:{}", ip, port).parse()?;
 
-        let ctx = tcp::connect(socket_addr).await?;
+        let mut ctx = tcp::connect(socket_addr).await?;
         ctx.set_slave(Slave(slave_id));
 
         let data: Vec<u16> = match function {
             ModbusFunction::ReadCoils => {
-                let response = ctx.read_coils(address, quantity).await?;
-                response.into_iter().map(|b| b.into() as u16).collect()
+                let response = ctx.read_coils(address, quantity).await??;
+                response.into_iter().map(|b| b as u16).collect()
             }
 
             ModbusFunction::ReadDiscrete => {
-                let response = ctx.read_discrete_inputs(address, quantity).await?;
-                response.into_iter().map(|b| b.into() as u16).collect()
+                let response = ctx.read_discrete_inputs(address, quantity).await??;
+                response.into_iter().map(|b| b as u16).collect()
             }
 
             ModbusFunction::ReadHolding => {
-                let response = ctx.read_holding_registers(address, quantity).await?;
-                response.into_iter().map(|r| r.into() as u16).collect()
+                let response = ctx.read_holding_registers(address, quantity).await??;
+                response.into_iter().map(|r| r as u16).collect()
             }
 
             ModbusFunction::ReadInput => {
-                let response = ctx.read_input_registers(address, quantity).await?;
-                response.into_iter().map(|r| r.into() as u16).collect()
+                let response = ctx.read_input_registers(address, quantity).await??;
+                response.into_iter().map(|r| r as u16).collect()
             }
         };
 
         Ok(data)
     }
+
+    pub fn format_value(raw: &[u16], fmt: DisplayFormat) -> String {
+        match fmt {
+            DisplayFormat::Signed => {
+                let v = raw.get(0).copied().unwrap_or(0) as i16;
+                v.to_string()
+            }
+            DisplayFormat::Unsigned => raw.get(0).copied().unwrap_or(0).to_string(),
+            DisplayFormat::Hex => {
+                format!("0x{:04X}", raw.get(0).copied().unwrap_or(0))
+            }
+            DisplayFormat::Binary => {
+                format!("{:016b}", raw.get(0).copied().unwrap_or(0))
+            }
+            DisplayFormat::Long => {
+                if raw.len() >= 2 {
+                    let v = ((raw[0] as u32) << 16) | raw[1] as u32;
+                    (v as i32).to_string()
+                } else {
+                    "-".into()
+                }
+            }
+            DisplayFormat::LongInverse => {
+                if raw.len() >= 2 {
+                    let v = ((raw[1] as u32) << 16) | raw[0] as u32;
+                    (v as i32).to_string()
+                } else {
+                    "-".into()
+                }
+            }
+            DisplayFormat::Float => {
+                if raw.len() >= 2 {
+                    let bits = ((raw[0] as u32) << 16) | raw[1] as u32;
+                    f32::from_bits(bits).to_string()
+                } else {
+                    "-".into()
+                }
+            }
+            DisplayFormat::FloatInverse => {
+                if raw.len() >= 2 {
+                    let bits = ((raw[1] as u32) << 16) | raw[0] as u32;
+                    f32::from_bits(bits).to_string()
+                } else {
+                    "-".into()
+                }
+            }
+            DisplayFormat::Double | DisplayFormat::DoubleInverse => {
+                if raw.len() >= 4 {
+                    let bits = if fmt == DisplayFormat::Double {
+                        ((raw[0] as u64) << 48)
+                            | ((raw[1] as u64) << 32)
+                            | ((raw[2] as u64) << 16)
+                            | (raw[3] as u64)
+                    } else {
+                        ((raw[3] as u64) << 48)
+                            | ((raw[2] as u64) << 32)
+                            | ((raw[1] as u64) << 16)
+                            | (raw[0] as u64)
+                    };
+                    f64::from_bits(bits).to_string()
+                } else {
+                    "-".into()
+                }
+            }
+        }
+    }
+}
+
+impl DisplayFormat {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DisplayFormat::Signed => "Signed",
+            DisplayFormat::Unsigned => "Unsigned",
+            DisplayFormat::Hex => "Hex",
+            DisplayFormat::Binary => "Binary",
+            DisplayFormat::Long => "Long",
+            DisplayFormat::LongInverse => "Long Inverse",
+            DisplayFormat::Float => "Float",
+            DisplayFormat::FloatInverse => "Float Inverse",
+            DisplayFormat::Double => "Double",
+            DisplayFormat::DoubleInverse => "Double Inverse",
+        }
+    }
+
+    pub const ALL: [DisplayFormat; 10] = [
+        DisplayFormat::Signed,
+        DisplayFormat::Unsigned,
+        DisplayFormat::Hex,
+        DisplayFormat::Binary,
+        DisplayFormat::Long,
+        DisplayFormat::LongInverse,
+        DisplayFormat::Float,
+        DisplayFormat::FloatInverse,
+        DisplayFormat::Double,
+        DisplayFormat::DoubleInverse,
+    ];
 }
