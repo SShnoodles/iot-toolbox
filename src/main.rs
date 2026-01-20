@@ -53,8 +53,14 @@ impl eframe::App for AppState {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            MainTab::Serial => self.serial.ui(ctx),
-            MainTab::Modbus => self.modbus.ui(ui),
+            MainTab::Serial => {
+                self.modbus.stop_auto_poll();
+                self.serial.ui(ctx);
+            }
+            MainTab::Modbus => {
+                self.serial.disconnect();
+                self.modbus.ui(ui)
+            }
         });
     }
 }

@@ -1,8 +1,9 @@
+use super::display::DisplayFormat;
 use anyhow::Result;
 use serialport::{DataBits, Parity, StopBits};
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use tokio_modbus::prelude::*;
 
 #[derive(PartialEq)]
@@ -19,25 +20,12 @@ pub enum ModbusFunction {
     ReadInput,    // 04
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
-pub enum DisplayFormat {
-    Signed,
-    Unsigned,
-    Hex,
-    Binary,
-    Long,
-    LongInverse,
-    Float,
-    FloatInverse,
-    Double,
-    DoubleInverse,
-}
-
 pub struct ModbusRow {
-    pub addr: u16,
-    pub raw: Vec<u16>, // original register
-    pub display_format: DisplayFormat,
-    pub display_value: String,
+    pub index: usize,
+    pub address: u16,
+    pub raw: Vec<u16>, // original
+    pub format: DisplayFormat,
+    pub value: String,
 }
 
 pub struct ModbusTool {
@@ -59,7 +47,7 @@ pub struct ModbusTool {
     pub address: u16,
     pub quantity: u16,
 
-    pub view_rows: usize, // 10 / 20 / 50
+    pub view_rows: usize,
     pub display_format: DisplayFormat,
 
     pub data: Vec<u16>,
@@ -67,9 +55,11 @@ pub struct ModbusTool {
     pub logs: Vec<String>,
     pub scroll_to_bottom: bool,
 
-    pub auto_poll: bool,
     pub rx: Option<Receiver<Vec<u16>>>,
     pub rt: tokio::runtime::Runtime,
+    pub stop_tx: Option<Sender<()>>,
+
+    pub status: String,
 }
 
 impl ModbusTool {
@@ -108,10 +98,11 @@ impl ModbusTool {
             logs: Vec::new(),
             scroll_to_bottom: false,
 
-            auto_poll: false,
             rx: None,
-
             rt: tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"),
+            stop_tx: None,
+
+            status: "Disconnected".to_string(),
         }
     }
 
@@ -123,9 +114,18 @@ impl ModbusTool {
 
             self.ui_view(ui);
 
-            self.ui_table(ui);
+            self.ui_table(
+                ui,
+                &mut Self::build_rows(
+                    self.address,
+                    &self.data,
+                    self.view_rows,
+                    self.display_format,
+                ),
+            );
 
             // self.ui_logs(ui);
+            self.ui_status(ui);
         });
 
         if let Some(rx) = &self.rx {
@@ -135,8 +135,15 @@ impl ModbusTool {
                 self.scroll_to_bottom = true;
             }
         }
+    }
 
-        self.handle_auto_poll();
+    fn ui_status(&mut self, ui: &mut egui::Ui) {
+        egui::TopBottomPanel::bottom("modbus_status").show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Status:");
+                ui.monospace(&self.status);
+            });
+        });
     }
 
     fn ui_connection(&mut self, ui: &mut egui::Ui) {
@@ -155,25 +162,6 @@ impl ModbusTool {
                 ModbusMode::Tcp => self.ui_tcp(ui),
                 ModbusMode::Rtu => self.ui_rtu(ui),
             }
-
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui
-                    .button(egui::RichText::new("Connect").color(egui::Color32::BLUE))
-                    .clicked()
-                {
-                    self.logs.push("Connecting...".into());
-                    self.scroll_to_bottom = true;
-                }
-                if ui
-                    .button(egui::RichText::new("Disconnect").color(egui::Color32::RED))
-                    .clicked()
-                {
-                    self.logs.push("Disconnected".into());
-                    self.scroll_to_bottom = true;
-                }
-            });
         });
     }
 
@@ -257,14 +245,6 @@ impl ModbusTool {
                 ui.label("Quantity");
                 ui.add(egui::DragValue::new(&mut self.quantity).range(1..=125));
             });
-
-            // ui.horizontal(|ui| {
-            //     ui.label("Address");
-            //     ui.add(egui::DragValue::new(&mut self.address));
-
-            //     ui.label("Quantity");
-            //     ui.add(egui::DragValue::new(&mut self.quantity).range(1..=125));
-            // });
         });
     }
 
@@ -277,7 +257,6 @@ impl ModbusTool {
                 ui.label(egui::RichText::new("Row: ").strong());
                 ui.radio_value(&mut self.view_rows, 10, "10");
                 ui.radio_value(&mut self.view_rows, 20, "20");
-                ui.radio_value(&mut self.view_rows, 50, "50");
 
                 ui.label(egui::RichText::new("Display: ").strong());
                 egui::ComboBox::from_id_salt("display")
@@ -330,43 +309,65 @@ impl ModbusTool {
         });
 
         ui.horizontal(|ui: &mut egui::Ui| {
-            if ui.button("Read Once").clicked() {
-                self.start_read_once();
-            }
+            let running = self.stop_tx.is_some();
 
-            ui.checkbox(&mut self.auto_poll, "Auto Poll (1s)");
+            if !running {
+                if ui.button("▶ Start Auto Poll").clicked() {
+                    self.start_auto_poll();
+                }
+            } else {
+                if ui.button("⏹ Stop Auto Poll").clicked() {
+                    self.stop_auto_poll();
+                }
+            }
         });
     }
 
-    fn ui_table(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            egui::ScrollArea::both()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    egui::Grid::new("modbus_table")
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.label("Row\\Addr");
-                            for i in 0..self.quantity {
-                                ui.label(format!("{}", self.address + i));
-                            }
+    pub fn ui_table(&mut self, ui: &mut egui::Ui, rows: &mut Vec<ModbusRow>) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                egui::Grid::new("modbus_table")
+                    .striped(true)
+                    .min_col_width(80.0)
+                    .show(ui, |ui| {
+                        ui.label("#");
+                        ui.label("Address");
+                        ui.label("Raw");
+                        ui.label("Format");
+                        ui.label("Value");
+                        ui.end_row();
+
+                        for row in rows.iter_mut() {
+                            ui.label(row.index.to_string());
+                            ui.label(format!("{}", row.address));
+
+                            ui.label(
+                                row.raw
+                                    .iter()
+                                    .map(|v| format!("{:04X}", v))
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            );
+
+                            egui::ComboBox::from_id_salt(format!("fmt_{}", row.index))
+                                .selected_text(row.format.label())
+                                .show_ui(ui, |ui| {
+                                    for f in DisplayFormat::ALL {
+                                        if ui
+                                            .selectable_value(&mut row.format, f, f.label())
+                                            .clicked()
+                                        {
+                                            row.value = row.format.format(&row.raw);
+                                        }
+                                    }
+                                });
+
+                            ui.label(&row.value);
                             ui.end_row();
-
-                            for row in 0..self.view_rows {
-                                ui.label(row.to_string());
-
-                                for col in 0..self.quantity {
-                                    let idx = row * self.quantity as usize + col as usize;
-                                    let v = self.data.get(idx).copied().unwrap_or(0);
-
-                                    let txt = Self::format_value(&[v], self.display_format);
-                                    ui.label(txt.to_string());
-                                }
-                                ui.end_row();
-                            }
-                        });
-                });
-        });
+                        }
+                    });
+            });
     }
 
     fn ui_logs(&mut self, ui: &mut egui::Ui) {
@@ -383,46 +384,16 @@ impl ModbusTool {
         });
     }
 
-    fn start_read_once(&mut self) {
-        let (tx, rx) = channel();
-        self.rx = Some(rx);
-
-        let ip = self.tcp_ip.clone();
-        let port = self.tcp_port;
-        let slave = self.slave_id;
-        let addr = self.address;
-        let qty: u16 = self.quantity;
-        let function = self.function;
-
-        self.logs.push("TX Read Holding Registers".into());
-        self.scroll_to_bottom = true;
-
-        self.rt.spawn(async move {
-            match Self::modbus_read_by_function(ip, port, slave, function, addr, qty).await {
-                Ok(data) => {
-                    let _ = tx.send(data);
-                }
-                Err(e) => {
-                    eprintln!("Modbus error: {:?}", e);
-                }
-            }
-        });
-    }
-
-    fn handle_auto_poll(&mut self) {
-        if self.auto_poll && self.rx.is_none() {
-            self.start_auto_poll();
-        }
-
-        if !self.auto_poll && self.rx.is_some() {
-            self.rx = None; // stop
-            self.logs.push("Auto Poll stopped".into());
-        }
-    }
-
     fn start_auto_poll(&mut self) {
-        let (tx, rx) = channel();
-        self.rx = Some(rx);
+        if self.stop_tx.is_some() {
+            return;
+        }
+
+        let (data_tx, data_rx) = channel::<Vec<u16>>();
+        let (stop_tx, stop_rx) = channel::<()>();
+
+        self.rx = Some(data_rx);
+        self.stop_tx = Some(stop_tx);
 
         let ip = self.tcp_ip.clone();
         let port = self.tcp_port;
@@ -431,18 +402,21 @@ impl ModbusTool {
         let qty = self.quantity;
         let function = self.function;
 
+        self.status = "Auto Poll started...".into();
         self.logs.push("Auto Poll started (1s)".into());
         self.scroll_to_bottom = true;
 
         self.rt.spawn(async move {
             loop {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+
                 match Self::modbus_read_by_function(ip.clone(), port, slave, function, addr, qty)
                     .await
                 {
                     Ok(data) => {
-                        if tx.send(data).is_err() {
-                            break; // stop
-                        }
+                        let _ = data_tx.send(data);
                     }
                     Err(_) => {}
                 }
@@ -450,6 +424,18 @@ impl ModbusTool {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         });
+    }
+
+    pub fn stop_auto_poll(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+
+        self.rx = None;
+
+        self.status = "Auto Poll stopped".into();
+        self.logs.push("Auto Poll stopped".into());
+        self.scroll_to_bottom = true;
     }
 
     async fn modbus_read_by_function(
@@ -490,99 +476,28 @@ impl ModbusTool {
         Ok(data)
     }
 
-    pub fn format_value(raw: &[u16], fmt: DisplayFormat) -> String {
-        match fmt {
-            DisplayFormat::Signed => {
-                let v = raw.get(0).copied().unwrap_or(0) as i16;
-                v.to_string()
-            }
-            DisplayFormat::Unsigned => raw.get(0).copied().unwrap_or(0).to_string(),
-            DisplayFormat::Hex => {
-                format!("0x{:04X}", raw.get(0).copied().unwrap_or(0))
-            }
-            DisplayFormat::Binary => {
-                format!("{:016b}", raw.get(0).copied().unwrap_or(0))
-            }
-            DisplayFormat::Long => {
-                if raw.len() >= 2 {
-                    let v = ((raw[0] as u32) << 16) | raw[1] as u32;
-                    (v as i32).to_string()
-                } else {
-                    "-".into()
-                }
-            }
-            DisplayFormat::LongInverse => {
-                if raw.len() >= 2 {
-                    let v = ((raw[1] as u32) << 16) | raw[0] as u32;
-                    (v as i32).to_string()
-                } else {
-                    "-".into()
-                }
-            }
-            DisplayFormat::Float => {
-                if raw.len() >= 2 {
-                    let bits = ((raw[0] as u32) << 16) | raw[1] as u32;
-                    f32::from_bits(bits).to_string()
-                } else {
-                    "-".into()
-                }
-            }
-            DisplayFormat::FloatInverse => {
-                if raw.len() >= 2 {
-                    let bits = ((raw[1] as u32) << 16) | raw[0] as u32;
-                    f32::from_bits(bits).to_string()
-                } else {
-                    "-".into()
-                }
-            }
-            DisplayFormat::Double | DisplayFormat::DoubleInverse => {
-                if raw.len() >= 4 {
-                    let bits = if fmt == DisplayFormat::Double {
-                        ((raw[0] as u64) << 48)
-                            | ((raw[1] as u64) << 32)
-                            | ((raw[2] as u64) << 16)
-                            | (raw[3] as u64)
-                    } else {
-                        ((raw[3] as u64) << 48)
-                            | ((raw[2] as u64) << 32)
-                            | ((raw[1] as u64) << 16)
-                            | (raw[0] as u64)
-                    };
-                    f64::from_bits(bits).to_string()
-                } else {
-                    "-".into()
-                }
-            }
-        }
-    }
-}
+    fn build_rows(
+        start_addr: u16,
+        regs: &[u16],
+        rows: usize,
+        format: DisplayFormat,
+    ) -> Vec<ModbusRow> {
+        let reg_per_row = format.register_count();
 
-impl DisplayFormat {
-    pub fn label(&self) -> &'static str {
-        match self {
-            DisplayFormat::Signed => "Signed",
-            DisplayFormat::Unsigned => "Unsigned",
-            DisplayFormat::Hex => "Hex",
-            DisplayFormat::Binary => "Binary",
-            DisplayFormat::Long => "Long",
-            DisplayFormat::LongInverse => "Long Inverse",
-            DisplayFormat::Float => "Float",
-            DisplayFormat::FloatInverse => "Float Inverse",
-            DisplayFormat::Double => "Double",
-            DisplayFormat::DoubleInverse => "Double Inverse",
-        }
-    }
+        (0..rows)
+            .map(|i| {
+                let addr = start_addr + (i * reg_per_row) as u16;
+                let start = i * reg_per_row;
+                let raw = regs.get(start..start + reg_per_row).unwrap_or(&[]).to_vec();
 
-    pub const ALL: [DisplayFormat; 10] = [
-        DisplayFormat::Signed,
-        DisplayFormat::Unsigned,
-        DisplayFormat::Hex,
-        DisplayFormat::Binary,
-        DisplayFormat::Long,
-        DisplayFormat::LongInverse,
-        DisplayFormat::Float,
-        DisplayFormat::FloatInverse,
-        DisplayFormat::Double,
-        DisplayFormat::DoubleInverse,
-    ];
+                ModbusRow {
+                    index: i,
+                    address: addr,
+                    raw: raw.clone(),
+                    format,
+                    value: format.format(&raw),
+                }
+            })
+            .collect()
+    }
 }
