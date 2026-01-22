@@ -1,5 +1,5 @@
 use super::display::DisplayFormat;
-use anyhow::Result;
+use anyhow::{Error, Result};
 use serialport::{DataBits, Parity, StopBits};
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
@@ -58,6 +58,7 @@ pub struct ModbusTool {
     pub rx: Option<Receiver<Vec<u16>>>,
     pub rt: tokio::runtime::Runtime,
     pub stop_tx: Option<Sender<()>>,
+    pub status_rx: Option<Receiver<String>>,
 
     pub status: String,
 }
@@ -101,6 +102,7 @@ impl ModbusTool {
             rx: None,
             rt: tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"),
             stop_tx: None,
+            status_rx: None,
 
             status: "Disconnected".to_string(),
         }
@@ -135,12 +137,18 @@ impl ModbusTool {
                 self.scroll_to_bottom = true;
             }
         }
+
+        if let Some(status_rx) = &self.status_rx {
+            while let Ok(status) = status_rx.try_recv() {
+                self.status = status;
+            }
+        }
     }
 
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         egui::TopBottomPanel::bottom("modbus_status").show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
-                ui.label("Status:");
+                ui.label(egui::RichText::new("Status: ").color(egui::Color32::RED));
                 ui.monospace(&self.status);
             });
         });
@@ -312,11 +320,17 @@ impl ModbusTool {
             let running = self.stop_tx.is_some();
 
             if !running {
-                if ui.button("▶ Start Auto Poll").clicked() {
+                if ui
+                    .button(egui::RichText::new("▶ Start Auto Poll").color(egui::Color32::BLUE))
+                    .clicked()
+                {
                     self.start_auto_poll();
                 }
             } else {
-                if ui.button("⏹ Stop Auto Poll").clicked() {
+                if ui
+                    .button(egui::RichText::new("⏹ Stop Auto Poll").color(egui::Color32::RED))
+                    .clicked()
+                {
                     self.stop_auto_poll();
                 }
             }
@@ -331,16 +345,15 @@ impl ModbusTool {
                     .striped(true)
                     .min_col_width(80.0)
                     .show(ui, |ui| {
-                        ui.label("#");
+                        ui.label("Index");
                         ui.label("Address");
                         ui.label("Raw");
-                        ui.label("Format");
                         ui.label("Value");
                         ui.end_row();
 
                         for row in rows.iter_mut() {
                             ui.label(row.index.to_string());
-                            ui.label(format!("{}", row.address));
+                            ui.label(row.address.to_string());
 
                             ui.label(
                                 row.raw
@@ -350,20 +363,7 @@ impl ModbusTool {
                                     .join(" "),
                             );
 
-                            egui::ComboBox::from_id_salt(format!("fmt_{}", row.index))
-                                .selected_text(row.format.label())
-                                .show_ui(ui, |ui| {
-                                    for f in DisplayFormat::ALL {
-                                        if ui
-                                            .selectable_value(&mut row.format, f, f.label())
-                                            .clicked()
-                                        {
-                                            row.value = row.format.format(&row.raw);
-                                        }
-                                    }
-                                });
-
-                            ui.label(&row.value);
+                            ui.label(row.format.format(&row.raw));
                             ui.end_row();
                         }
                     });
@@ -391,9 +391,11 @@ impl ModbusTool {
 
         let (data_tx, data_rx) = channel::<Vec<u16>>();
         let (stop_tx, stop_rx) = channel::<()>();
+        let (status_tx, status_rx) = channel::<String>();
 
         self.rx = Some(data_rx);
         self.stop_tx = Some(stop_tx);
+        self.status_rx = Some(status_rx);
 
         let ip = self.tcp_ip.clone();
         let port = self.tcp_port;
@@ -407,22 +409,21 @@ impl ModbusTool {
         self.scroll_to_bottom = true;
 
         self.rt.spawn(async move {
-            loop {
-                if stop_rx.try_recv().is_ok() {
-                    break;
-                }
-
-                match Self::modbus_read_by_function(ip.clone(), port, slave, function, addr, qty)
-                    .await
-                {
-                    Ok(data) => {
-                        let _ = data_tx.send(data);
-                    }
-                    Err(_) => {}
-                }
-
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if stop_rx.try_recv().is_ok() {
+                return;
             }
+
+            match Self::modbus_read_by_function(ip.clone(), port, slave, function, addr, qty).await
+            {
+                Ok(data) => {
+                    let _ = data_tx.send(data);
+                }
+                Err(e) => {
+                    let _ = status_tx.send(format!("Read error: {}", e));
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         });
     }
 
@@ -432,9 +433,7 @@ impl ModbusTool {
         }
 
         self.rx = None;
-
         self.status = "Auto Poll stopped".into();
-        self.logs.push("Auto Poll stopped".into());
         self.scroll_to_bottom = true;
     }
 
@@ -445,7 +444,7 @@ impl ModbusTool {
         function: ModbusFunction,
         address: u16,
         quantity: u16,
-    ) -> Result<Vec<u16>> {
+    ) -> Result<Vec<u16>, Error> {
         let socket_addr: SocketAddr = format!("{}:{}", ip, port).parse()?;
 
         let mut ctx = tcp::connect(socket_addr).await?;

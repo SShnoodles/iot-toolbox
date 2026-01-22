@@ -1,13 +1,12 @@
+use super::utils::{bytes_to_hex_string, now_timestamp, parse_hex_string};
 use eframe::egui;
 use serialport::{self, SerialPort, SerialPortInfo};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use super::utils::{parse_hex_string, bytes_to_hex_string, now_timestamp};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SendFormat {
@@ -67,11 +66,9 @@ impl SerialTool {
 
                 let display = match self.send_format {
                     SendFormat::Hex => bytes_to_hex_string(&data),
-                    SendFormat::Ascii => {
-                        String::from_utf8_lossy(&data)
-                            .replace('\r', "\\r")
-                            .replace('\n', "\\n")
-                    }
+                    SendFormat::Ascii => String::from_utf8_lossy(&data)
+                        .replace('\r', "\\r")
+                        .replace('\n', "\\n"),
                 };
 
                 self.logs.push(format!("{} RX <- {}", ts, display));
@@ -91,30 +88,27 @@ impl SerialTool {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical(|ui| {
                 // config
-                egui::Frame::group(ui.style())
-                    .show(ui, |ui| {
-                        self.ui_config(ui);
-                    });
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    self.ui_config(ui);
+                });
 
                 ui.add_space(6.0);
 
                 // send
-                egui::Frame::group(ui.style())
-                    .show(ui, |ui| {
-                        ui.label("Send");
-                        self.ui_sender(ui);
-                    });
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label("Send");
+                    self.ui_sender(ui);
+                });
 
                 ui.add_space(6.0);
 
                 // log
                 let available_height = ui.available_height();
 
-                egui::Frame::group(ui.style())
-                    .show(ui, |ui| {
-                        ui.set_min_height(available_height);
-                        self.ui_logs(ui);
-                    });
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_min_height(available_height);
+                    self.ui_logs(ui);
+                });
             });
         });
     }
@@ -125,7 +119,10 @@ impl SerialTool {
         // Refresh + Port
         // -------------------------------
         ui.horizontal(|ui| {
-            if ui.button(egui::RichText::new("Refresh Ports").color(egui::Color32::BLUE)).clicked() {
+            if ui
+                .button(egui::RichText::new("Refresh Ports").color(egui::Color32::BLUE))
+                .clicked()
+            {
                 self.available_ports = serialport::available_ports().unwrap_or_default();
                 self.selected_port = Some("Select Port".to_string());
             }
@@ -189,9 +186,21 @@ impl SerialTool {
             ui.separator();
 
             ui.label(egui::RichText::new("Flow control:").strong());
-            ui.radio_value(&mut self.flow_control, serialport::FlowControl::None, "None");
-            ui.radio_value(&mut self.flow_control, serialport::FlowControl::Software, "Software");
-            ui.radio_value(&mut self.flow_control, serialport::FlowControl::Hardware, "Hardware");
+            ui.radio_value(
+                &mut self.flow_control,
+                serialport::FlowControl::None,
+                "None",
+            );
+            ui.radio_value(
+                &mut self.flow_control,
+                serialport::FlowControl::Software,
+                "Software",
+            );
+            ui.radio_value(
+                &mut self.flow_control,
+                serialport::FlowControl::Hardware,
+                "Hardware",
+            );
         });
 
         ui.add_space(4.0);
@@ -200,10 +209,16 @@ impl SerialTool {
         // Connect / Disconnect
         // -------------------------------
         ui.horizontal(|ui| {
-            if ui.button(egui::RichText::new("Connect").color(egui::Color32::BLUE)).clicked() {
+            if ui
+                .button(egui::RichText::new("Connect").color(egui::Color32::BLUE))
+                .clicked()
+            {
                 self.connect();
             }
-            if ui.button(egui::RichText::new("Disconnect").color(egui::Color32::RED)).clicked() {
+            if ui
+                .button(egui::RichText::new("Disconnect").color(egui::Color32::RED))
+                .clicked()
+            {
                 self.disconnect();
             }
         });
@@ -220,14 +235,16 @@ impl SerialTool {
 
             ui.add_sized(
                 [ui.available_width() - 140.0, 24.0],
-                egui::TextEdit::multiline(&mut self.input_text)
-                    .hint_text(match self.send_format {
-                        SendFormat::Hex => "48 65 6C 6C 6F",
-                        SendFormat::Ascii => "Hello",
-                    }),
+                egui::TextEdit::multiline(&mut self.input_text).hint_text(match self.send_format {
+                    SendFormat::Hex => "48 65 6C 6C 6F",
+                    SendFormat::Ascii => "Hello",
+                }),
             );
 
-            if ui.button(egui::RichText::new("Send").color(egui::Color32::BLUE)).clicked() {
+            if ui
+                .button(egui::RichText::new("Send").color(egui::Color32::BLUE))
+                .clicked()
+            {
                 self.send();
             }
         });
@@ -266,11 +283,7 @@ impl SerialTool {
 
                 let (tx, rx) = mpsc::channel();
 
-                Self::start_read_thread(
-                    port.clone(),
-                    tx,
-                    self.read_running.clone(),
-                );
+                Self::start_read_thread(port.clone(), tx, self.read_running.clone());
 
                 self.port = Some(port);
                 self.rx = Some(rx);
@@ -289,9 +302,7 @@ impl SerialTool {
 
         self.port = None;
         self.rx = None;
-
         self.status = "Disconnected".into();
-        self.logs.push("Disconnected".into());
     }
 
     pub fn send(&mut self) {
@@ -326,7 +337,11 @@ impl SerialTool {
         self.logs.push(format!("{} TX -> {}", ts, display));
     }
 
-    pub fn start_read_thread(port: Arc<Mutex<Box<dyn SerialPort>>>, tx: Sender<Vec<u8>>, running: Arc<AtomicBool>) {
+    pub fn start_read_thread(
+        port: Arc<Mutex<Box<dyn SerialPort>>>,
+        tx: Sender<Vec<u8>>,
+        running: Arc<AtomicBool>,
+    ) {
         running.store(true, Ordering::SeqCst);
 
         thread::spawn(move || {
@@ -372,5 +387,4 @@ impl SerialTool {
             }
         });
     }
-    
 }

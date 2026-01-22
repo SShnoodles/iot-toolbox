@@ -91,7 +91,7 @@ impl DisplayFormat {
             DisplayFormat::Float => {
                 if raw.len() >= 2 {
                     let bits = ((raw[0] as u32) << 16) | raw[1] as u32;
-                    f32::from_bits(bits).to_string()
+                    format!("{:.4}", f32::from_bits(bits))
                 } else {
                     "-".into()
                 }
@@ -99,7 +99,7 @@ impl DisplayFormat {
             DisplayFormat::FloatInverse => {
                 if raw.len() >= 2 {
                     let bits = ((raw[1] as u32) << 16) | raw[0] as u32;
-                    f32::from_bits(bits).to_string()
+                    format!("{:.4}", f32::from_bits(bits))
                 } else {
                     "-".into()
                 }
@@ -110,7 +110,7 @@ impl DisplayFormat {
                         | ((raw[1] as u64) << 32)
                         | ((raw[2] as u64) << 16)
                         | (raw[3] as u64);
-                    f64::from_bits(bits).to_string()
+                    format!("{:.4}", f64::from_bits(bits))
                 } else {
                     "-".into()
                 }
@@ -121,7 +121,7 @@ impl DisplayFormat {
                         | ((raw[2] as u64) << 32)
                         | ((raw[1] as u64) << 16)
                         | (raw[0] as u64);
-                    f64::from_bits(bits).to_string()
+                    format!("{:.4}", f64::from_bits(bits))
                 } else {
                     "-".into()
                 }
