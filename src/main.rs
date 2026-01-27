@@ -1,8 +1,10 @@
-mod serial;
 mod modbus;
+mod serial;
 
-use serial::app::SerialTool;
 use eframe::egui::{self};
+use serial::app::SerialTool;
+
+use crate::modbus::app::ModbusTool;
 
 const APP_FULL: &str = concat!("IoT Toolbox", " ", "V1.0.0");
 
@@ -28,46 +30,37 @@ enum MainTab {
 struct AppState {
     tab: MainTab,
     serial: SerialTool,
+    modbus: ModbusTool,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         AppState {
             tab: MainTab::Serial,
-            serial: SerialTool::new()
+            serial: SerialTool::new(),
+            modbus: ModbusTool::new(),
         }
     }
 }
 
 impl eframe::App for AppState {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::TopBottomPanel::top("top_tabs").show(ctx, |ui| {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(self.tab == MainTab::Serial, "Serial")
-                    .clicked()
-                {
-                    self.tab = MainTab::Serial;
-                }
-
-                if ui
-                    .selectable_label(self.tab == MainTab::Modbus, "Modbus")
-                    .clicked()
-                {
-                    self.tab = MainTab::Modbus;
-                }
+                ui.selectable_value(&mut self.tab, MainTab::Serial, "Serial");
+                ui.selectable_value(&mut self.tab, MainTab::Modbus, "Modbus");
             });
         });
 
-        match self.tab {
-            MainTab::Serial => self.serial.ui(ctx),
-            MainTab::Modbus => {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Modbus UI not implemented yet");
-                    });
-                });
+        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            MainTab::Serial => {
+                self.modbus.stop_auto_poll();
+                self.serial.ui(ctx);
             }
-        }
+            MainTab::Modbus => {
+                self.serial.disconnect();
+                self.modbus.ui(ui)
+            }
+        });
     }
 }

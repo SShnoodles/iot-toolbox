@@ -10,6 +10,7 @@ Built with **Rust + egui** — runs natively on Windows, macOS and Linux
 
 ## Features
 - [x] Serial
+- [x] Modbus Read
 - [ ] Modbus
 
 ## In action
