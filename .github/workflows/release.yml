@@ -126,11 +126,13 @@ jobs:
           export ARCH=x86_64
           export LDAI_OUTPUT="$PWD/dist/iot-toolbox-${VERSION}-linux-x86_64.AppImage"
           export LINUXDEPLOY_OUTPUT_VERSION="${VERSION}"
+          appimage_icon="package/iot-toolbox.png"
+          install -m 0644 packaging/icons/iot-toolbox-512.png "${appimage_icon}"
           "${linuxdeploy}" --appimage-extract-and-run \
             --appdir package/AppDir \
             --executable target/release/iot-toolbox \
             --desktop-file packaging/linux/iot-toolbox.desktop \
-            --icon-file packaging/icons/iot-toolbox-512.png \
+            --icon-file "${appimage_icon}" \
             --output appimage
 
           cd dist
