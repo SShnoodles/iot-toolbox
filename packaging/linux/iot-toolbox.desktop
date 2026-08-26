@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=IoT Toolbox
+Comment=Serial and Modbus debugging tool
+Exec=iot-toolbox
+Icon=iot-toolbox
+Terminal=false
+Categories=Development;Utility;

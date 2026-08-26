@@ -6,11 +6,18 @@ use serial::app::SerialTool;
 
 use crate::modbus::app::ModbusTool;
 
-const APP_FULL: &str = concat!("IoT Toolbox", " ", "V1.0.0");
+const APP_FULL: &str = concat!("IoT Toolbox v", env!("CARGO_PKG_VERSION"));
 
 fn main() {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../packaging/icons/iot-toolbox-256.png"
+    ))
+    .expect("embedded application icon must be a valid PNG");
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]), // 720p
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 720.0]) // 720p
+            .with_icon(icon),
         ..Default::default()
     };
     let _ = eframe::run_native(

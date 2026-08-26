@@ -1,0 +1,358 @@
+# Builds installable and portable release artifacts for every supported desktop OS.
+name: Build release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Linux x86_64
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    runs-on: ubuntu-24.04
+    # Build in an older userspace so the binary works on Ubuntu 22.04 and newer,
+    # without tying the workflow to the deprecated ubuntu-22.04 runner image.
+    container: ubuntu:22.04
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install Linux build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            jq \
+            libgl1-mesa-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Read package version
+        id: package
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq --raw-output '.packages[0].version')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "v${VERSION}" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version ${VERSION}." >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build tar.gz, deb, and AppImage packages
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euxo pipefail
+
+          archive_name="iot-toolbox-${VERSION}-linux-x86_64"
+          archive_root="package/${archive_name}"
+          deb_root="package/iot-toolbox_${VERSION}_amd64"
+
+          mkdir -p "${archive_root}" dist
+          install -m 0755 target/release/iot-toolbox "${archive_root}/iot-toolbox"
+          install -m 0644 README.md "${archive_root}/README.md"
+          tar -C package -czf "dist/${archive_name}.tar.gz" "${archive_name}"
+
+          mkdir -p \
+            "${deb_root}/DEBIAN" \
+            "${deb_root}/usr/bin" \
+            "${deb_root}/usr/share/applications" \
+            "${deb_root}/usr/share/doc/iot-toolbox" \
+            "${deb_root}/usr/share/icons/hicolor/512x512/apps"
+
+          install -m 0755 target/release/iot-toolbox "${deb_root}/usr/bin/iot-toolbox"
+          install -m 0644 README.md "${deb_root}/usr/share/doc/iot-toolbox/README.md"
+          install -m 0644 packaging/linux/iot-toolbox.desktop \
+            "${deb_root}/usr/share/applications/iot-toolbox.desktop"
+          install -m 0644 packaging/icons/iot-toolbox-512.png \
+            "${deb_root}/usr/share/icons/hicolor/512x512/apps/iot-toolbox.png"
+
+          cat > "${deb_root}/DEBIAN/control" <<EOF
+          Package: iot-toolbox
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: IoT Toolbox contributors
+          Depends: libgl1, libudev1, libwayland-client0, libx11-6, libxcb1, libxkbcommon0
+          Description: Cross-platform IoT debugging tool
+           A lightweight serial and Modbus debugging GUI built with Rust and egui.
+          EOF
+
+          dpkg-deb --build --root-owner-group \
+            "${deb_root}" \
+            "dist/iot-toolbox_${VERSION}_amd64.deb"
+
+          linuxdeploy="package/linuxdeploy-x86_64.AppImage"
+          curl --fail --location --retry 3 \
+            --output "${linuxdeploy}" \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage"
+          echo "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  ${linuxdeploy}" \
+            | sha256sum --check --strict
+          chmod +x "${linuxdeploy}"
+
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export ARCH=x86_64
+          export LDAI_OUTPUT="$PWD/dist/iot-toolbox-${VERSION}-linux-x86_64.AppImage"
+          export LINUXDEPLOY_OUTPUT_VERSION="${VERSION}"
+          "${linuxdeploy}" --appimage-extract-and-run \
+            --appdir package/AppDir \
+            --executable target/release/iot-toolbox \
+            --desktop-file packaging/linux/iot-toolbox.desktop \
+            --icon-file packaging/icons/iot-toolbox-512.png \
+            --output appimage
+
+          cd dist
+          sha256sum ./*.AppImage ./*.deb ./*.tar.gz > SHA256SUMS-linux-x86_64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: iot-toolbox-${{ steps.package.outputs.version }}-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows x86_64
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    runs-on: windows-2025
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Read package version
+        id: package
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = $metadata.packages[0].version
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          if ($env:GITHUB_REF_NAME -ne "v$env:VERSION") {
+            throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $env:VERSION."
+          }
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build portable zip and installer
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          $archiveName = "iot-toolbox-$env:VERSION-windows-x86_64"
+          $archiveRoot = "package\$archiveName"
+          New-Item -ItemType Directory -Force -Path $archiveRoot, "dist" | Out-Null
+          Copy-Item "target\release\iot-toolbox.exe" "$archiveRoot\iot-toolbox.exe"
+          Copy-Item "README.md" "$archiveRoot\README.md"
+          Compress-Archive -Path $archiveRoot -DestinationPath "dist\$archiveName.zip"
+
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "packaging\windows\iot-toolbox.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE."
+          }
+
+          Get-ChildItem "dist" -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$hash *$($_.Name)"
+          } | Set-Content -Encoding ascii "dist\SHA256SUMS-windows-x86_64"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: iot-toolbox-${{ steps.package.outputs.version }}-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS ${{ matrix.artifact_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            artifact_arch: aarch64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Read package version
+        id: package
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq --raw-output '.packages[0].version')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "v${VERSION}" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version ${VERSION}." >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build app zip and dmg
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+        run: |
+          set -euxo pipefail
+
+          app_root="package/IoT Toolbox.app"
+          dmg_root="package/dmg"
+          artifact_name="iot-toolbox-${VERSION}-macos-${ARTIFACT_ARCH}"
+
+          mkdir -p "${app_root}/Contents/MacOS" "${app_root}/Contents/Resources" dist
+          install -m 0755 "target/${TARGET}/release/iot-toolbox" \
+            "${app_root}/Contents/MacOS/iot-toolbox"
+          install -m 0644 packaging/macos/Info.plist "${app_root}/Contents/Info.plist"
+          install -m 0644 packaging/macos/iot-toolbox.icns \
+            "${app_root}/Contents/Resources/iot-toolbox.icns"
+          install -m 0644 README.md "${app_root}/Contents/Resources/README.md"
+
+          plutil -replace CFBundleShortVersionString -string "${VERSION}" \
+            "${app_root}/Contents/Info.plist"
+          plutil -replace CFBundleVersion -string "${VERSION}" \
+            "${app_root}/Contents/Info.plist"
+          plutil -lint "${app_root}/Contents/Info.plist"
+
+          codesign --force --deep --sign - "${app_root}"
+          codesign --verify --deep --strict --verbose=2 "${app_root}"
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "${app_root}" "dist/${artifact_name}.app.zip"
+
+          mkdir -p "${dmg_root}"
+          ditto "${app_root}" "${dmg_root}/IoT Toolbox.app"
+          ln -s /Applications "${dmg_root}/Applications"
+          hdiutil create \
+            -volname "IoT Toolbox" \
+            -srcfolder "${dmg_root}" \
+            -format UDZO \
+            -ov \
+            "dist/${artifact_name}.dmg"
+
+          cd dist
+          shasum -a 256 ./*.app.zip ./*.dmg > "SHA256SUMS-macos-${ARTIFACT_ARCH}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: iot-toolbox-${{ steps.package.outputs.version }}-macos-${{ matrix.artifact_arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - build-linux
+      - build-windows
+      - build-macos
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Linux packages
+        uses: actions/download-artifact@v8
+        with:
+          name: iot-toolbox-${{ needs.build-linux.outputs.version }}-linux-x86_64
+          path: dist
+
+      - name: Download Windows packages
+        uses: actions/download-artifact@v8
+        with:
+          name: iot-toolbox-${{ needs.build-windows.outputs.version }}-windows-x86_64
+          path: dist
+
+      - name: Download macOS Apple Silicon packages
+        uses: actions/download-artifact@v8
+        with:
+          name: iot-toolbox-${{ needs.build-linux.outputs.version }}-macos-aarch64
+          path: dist
+
+      - name: Download macOS Intel packages
+        uses: actions/download-artifact@v8
+        with:
+          name: iot-toolbox-${{ needs.build-linux.outputs.version }}-macos-x86_64
+          path: dist
+
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --generate-notes \
+              --title "IoT Toolbox $GITHUB_REF_NAME"
+          fi
