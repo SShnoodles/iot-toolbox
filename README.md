@@ -13,7 +13,7 @@ Built with **Rust + egui** — runs natively on Windows, macOS and Linux
 ## Features
 - [x] Serial
 - [x] Modbus Read
-- [ ] Modbus
+- [x] Modbus Write (function codes 05, 06, 15, and 16)
 
 ## In action
 

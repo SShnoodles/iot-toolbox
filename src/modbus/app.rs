@@ -1,5 +1,5 @@
 use super::display::DisplayFormat;
-use anyhow::{Error, Result};
+use anyhow::{bail, Error, Result};
 use serialport::{DataBits, Parity, StopBits};
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
@@ -14,10 +14,44 @@ pub enum ModbusMode {
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ModbusFunction {
-    ReadCoils,    // 01
-    ReadDiscrete, // 02
-    ReadHolding,  // 03
-    ReadInput,    // 04
+    ReadCoils,              // 01
+    ReadDiscrete,           // 02
+    ReadHolding,            // 03
+    ReadInput,              // 04
+    WriteSingleCoil,        // 05
+    WriteSingleRegister,    // 06
+    WriteMultipleCoils,     // 0F
+    WriteMultipleRegisters, // 10
+}
+
+impl ModbusFunction {
+    fn is_read(self) -> bool {
+        matches!(
+            self,
+            Self::ReadCoils | Self::ReadDiscrete | Self::ReadHolding | Self::ReadInput
+        )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadCoils => "01 Read Coils (0x)",
+            Self::ReadDiscrete => "02 Read Discrete Inputs (1x)",
+            Self::ReadHolding => "03 Read Holding Registers (4x)",
+            Self::ReadInput => "04 Read Input Registers (3x)",
+            Self::WriteSingleCoil => "05 Write Single Coil (0x)",
+            Self::WriteSingleRegister => "06 Write Single Register (4x)",
+            Self::WriteMultipleCoils => "15 Write Multiple Coils (0x)",
+            Self::WriteMultipleRegisters => "16 Write Multiple Registers (4x)",
+        }
+    }
+
+    fn max_read_quantity(self) -> u16 {
+        match self {
+            Self::ReadCoils | Self::ReadDiscrete => 2000,
+            Self::ReadHolding | Self::ReadInput => 125,
+            _ => 1,
+        }
+    }
 }
 
 pub struct ModbusRow {
@@ -46,6 +80,7 @@ pub struct ModbusTool {
     pub function: ModbusFunction,
     pub address: u16,
     pub quantity: u16,
+    pub write_values: String,
 
     pub view_rows: usize,
     pub display_format: DisplayFormat,
@@ -90,6 +125,7 @@ impl ModbusTool {
             function: ModbusFunction::ReadHolding,
             address: 0,
             quantity: 10,
+            write_values: "0".to_string(),
 
             view_rows: 10,
             display_format: DisplayFormat::Signed,
@@ -114,17 +150,22 @@ impl ModbusTool {
 
             self.ui_slave(ui);
 
-            self.ui_view(ui);
+            if self.function.is_read() {
+                self.ui_view(ui);
 
-            self.ui_table(
-                ui,
-                &mut Self::build_rows(
-                    self.address,
-                    &self.data,
-                    self.view_rows,
-                    self.display_format,
-                ),
-            );
+                self.ui_table(
+                    ui,
+                    &mut Self::build_rows(
+                        self.address,
+                        &self.data,
+                        self.view_rows,
+                        self.display_format,
+                    ),
+                );
+            } else {
+                self.stop_auto_poll();
+                self.ui_write(ui);
+            }
 
             // self.ui_logs(ui);
             self.ui_status(ui);
@@ -223,36 +264,104 @@ impl ModbusTool {
 
                 ui.label("Function");
                 egui::ComboBox::from_id_salt("func")
-                    .selected_text(format!("{:?}", self.function))
+                    .selected_text(self.function.label())
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut self.function,
                             ModbusFunction::ReadCoils,
-                            "01 Read Coils(0x)",
+                            ModbusFunction::ReadCoils.label(),
                         );
                         ui.selectable_value(
                             &mut self.function,
                             ModbusFunction::ReadDiscrete,
-                            "02 Read Discrete Inputs(1x)",
+                            ModbusFunction::ReadDiscrete.label(),
                         );
                         ui.selectable_value(
                             &mut self.function,
                             ModbusFunction::ReadHolding,
-                            "03 Read Holding Registers(4x)",
+                            ModbusFunction::ReadHolding.label(),
                         );
                         ui.selectable_value(
                             &mut self.function,
                             ModbusFunction::ReadInput,
-                            "04 Read Input Registers(3x)",
+                            ModbusFunction::ReadInput.label(),
+                        );
+                        ui.separator();
+                        ui.selectable_value(
+                            &mut self.function,
+                            ModbusFunction::WriteSingleCoil,
+                            ModbusFunction::WriteSingleCoil.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.function,
+                            ModbusFunction::WriteSingleRegister,
+                            ModbusFunction::WriteSingleRegister.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.function,
+                            ModbusFunction::WriteMultipleCoils,
+                            ModbusFunction::WriteMultipleCoils.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.function,
+                            ModbusFunction::WriteMultipleRegisters,
+                            ModbusFunction::WriteMultipleRegisters.label(),
                         );
                     });
 
                 ui.label("Address");
                 ui.add(egui::DragValue::new(&mut self.address));
 
-                ui.label("Quantity");
-                ui.add(egui::DragValue::new(&mut self.quantity).range(1..=125));
+                if self.function.is_read() {
+                    ui.label("Quantity");
+                    ui.add(
+                        egui::DragValue::new(&mut self.quantity)
+                            .range(1..=self.function.max_read_quantity()),
+                    );
+                }
             });
+        });
+    }
+
+    fn ui_write(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("Write").strong());
+
+            ui.horizontal(|ui| {
+                ui.label("Value(s)");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.write_values)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Comma or space separated; decimal or 0x hex"),
+                );
+            });
+
+            let hint = match self.function {
+                ModbusFunction::WriteSingleCoil => {
+                    "Enter one coil value: 0/1, off/on, or false/true."
+                }
+                ModbusFunction::WriteSingleRegister => {
+                    "Enter one register value from 0 to 65535 (or 0x0000 to 0xFFFF)."
+                }
+                ModbusFunction::WriteMultipleCoils => {
+                    "Enter 1 to 1968 coil values: 0/1, off/on, or false/true."
+                }
+                ModbusFunction::WriteMultipleRegisters => {
+                    "Enter 1 to 123 register values from 0 to 65535."
+                }
+                _ => "",
+            };
+            ui.label(egui::RichText::new(hint).weak().small());
+
+            let send_button =
+                egui::Button::new(egui::RichText::new("Send Write").color(egui::Color32::BLUE));
+            if ui
+                .add_enabled(!self.status.starts_with("Sending "), send_button)
+                .clicked()
+            {
+                self.send_write();
+            }
         });
     }
 
@@ -385,7 +494,7 @@ impl ModbusTool {
     }
 
     fn start_auto_poll(&mut self) {
-        if self.stop_tx.is_some() {
+        if self.stop_tx.is_some() || !self.function.is_read() {
             return;
         }
 
@@ -401,8 +510,9 @@ impl ModbusTool {
         let port = self.tcp_port;
         let slave = self.slave_id;
         let addr = self.address;
-        let qty = self.quantity;
         let function = self.function;
+        let qty = self.quantity.clamp(1, function.max_read_quantity());
+        self.quantity = qty;
 
         self.status = "Auto Poll started...".into();
         self.logs.push("Auto Poll started (1s)".into());
@@ -430,11 +540,51 @@ impl ModbusTool {
     pub fn stop_auto_poll(&mut self) {
         if let Some(stop_tx) = self.stop_tx.take() {
             let _ = stop_tx.send(());
+            self.status = "Auto Poll stopped".into();
+            self.scroll_to_bottom = true;
         }
 
         self.rx = None;
-        self.status = "Auto Poll stopped".into();
-        self.scroll_to_bottom = true;
+    }
+
+    fn send_write(&mut self) {
+        if self.status.starts_with("Sending ") {
+            return;
+        }
+
+        let values = match Self::parse_write_values(self.function, &self.write_values) {
+            Ok(values) => values,
+            Err(error) => {
+                self.status = format!("Invalid write value: {error}");
+                return;
+            }
+        };
+
+        let (status_tx, status_rx) = channel::<String>();
+        self.status_rx = Some(status_rx);
+
+        let ip = self.tcp_ip.clone();
+        let port = self.tcp_port;
+        let slave = self.slave_id;
+        let function = self.function;
+        let address = self.address;
+        let value_count = values.len();
+
+        self.status = format!("Sending {}...", function.label());
+
+        self.rt.spawn(async move {
+            let status =
+                match Self::modbus_write_by_function(ip, port, slave, function, address, values)
+                    .await
+                {
+                    Ok(()) => format!(
+                        "Write successful: {} value(s) at address {}",
+                        value_count, address
+                    ),
+                    Err(error) => format!("Write error: {error}"),
+                };
+            let _ = status_tx.send(status);
+        });
     }
 
     async fn modbus_read_by_function(
@@ -470,9 +620,106 @@ impl ModbusTool {
                 let response = ctx.read_input_registers(address, quantity).await??;
                 response.into_iter().map(|r| r as u16).collect()
             }
+
+            _ => bail!("{} is not a read function", function.label()),
         };
 
         Ok(data)
+    }
+
+    async fn modbus_write_by_function(
+        ip: String,
+        port: u16,
+        slave_id: u8,
+        function: ModbusFunction,
+        address: u16,
+        values: Vec<u16>,
+    ) -> Result<(), Error> {
+        let socket_addr: SocketAddr = format!("{}:{}", ip, port).parse()?;
+
+        let mut ctx = tcp::connect(socket_addr).await?;
+        ctx.set_slave(Slave(slave_id));
+
+        match function {
+            ModbusFunction::WriteSingleCoil => {
+                let [value] = values.as_slice() else {
+                    bail!("{} requires exactly one value", function.label());
+                };
+                ctx.write_single_coil(address, *value != 0).await??;
+            }
+            ModbusFunction::WriteSingleRegister => {
+                let [value] = values.as_slice() else {
+                    bail!("{} requires exactly one value", function.label());
+                };
+                ctx.write_single_register(address, *value).await??;
+            }
+            ModbusFunction::WriteMultipleCoils => {
+                let coils: Vec<bool> = values.into_iter().map(|value| value != 0).collect();
+                ctx.write_multiple_coils(address, &coils).await??;
+            }
+            ModbusFunction::WriteMultipleRegisters => {
+                ctx.write_multiple_registers(address, &values).await??;
+            }
+            _ => bail!("{} is not a write function", function.label()),
+        }
+
+        Ok(())
+    }
+
+    fn parse_write_values(function: ModbusFunction, input: &str) -> Result<Vec<u16>, Error> {
+        let tokens: Vec<&str> = input
+            .split(|character: char| {
+                character.is_ascii_whitespace() || character == ',' || character == ';'
+            })
+            .filter(|token| !token.is_empty())
+            .collect();
+
+        if tokens.is_empty() {
+            bail!("at least one value is required");
+        }
+
+        let (is_coil, min_count, max_count) = match function {
+            ModbusFunction::WriteSingleCoil => (true, 1, 1),
+            ModbusFunction::WriteSingleRegister => (false, 1, 1),
+            ModbusFunction::WriteMultipleCoils => (true, 1, 1968),
+            ModbusFunction::WriteMultipleRegisters => (false, 1, 123),
+            _ => bail!("{} is not a write function", function.label()),
+        };
+
+        if tokens.len() < min_count || tokens.len() > max_count {
+            if min_count == max_count {
+                bail!("{} requires exactly one value", function.label());
+            }
+            bail!(
+                "{} accepts between {} and {} values",
+                function.label(),
+                min_count,
+                max_count
+            );
+        }
+
+        tokens
+            .into_iter()
+            .map(|token| {
+                if is_coil {
+                    match token.to_ascii_lowercase().as_str() {
+                        "0" | "off" | "false" => Ok(0),
+                        "1" | "on" | "true" => Ok(1),
+                        _ => bail!("'{token}' is not a valid coil value"),
+                    }
+                } else if let Some(hex) = token
+                    .strip_prefix("0x")
+                    .or_else(|| token.strip_prefix("0X"))
+                {
+                    u16::from_str_radix(hex, 16)
+                        .map_err(|_| anyhow::anyhow!("'{token}' is not a valid 16-bit value"))
+                } else {
+                    token
+                        .parse::<u16>()
+                        .map_err(|_| anyhow::anyhow!("'{token}' is not a valid 16-bit value"))
+                }
+            })
+            .collect()
     }
 
     fn build_rows(
@@ -498,5 +745,59 @@ impl ModbusTool {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModbusFunction, ModbusTool};
+
+    #[test]
+    fn parses_decimal_and_hex_register_values() {
+        let values = ModbusTool::parse_write_values(
+            ModbusFunction::WriteMultipleRegisters,
+            "1, 0x00FF 65535;0X10",
+        )
+        .unwrap();
+
+        assert_eq!(values, vec![1, 255, 65535, 16]);
+    }
+
+    #[test]
+    fn parses_named_coil_values() {
+        let values = ModbusTool::parse_write_values(
+            ModbusFunction::WriteMultipleCoils,
+            "0, 1 off ON false true",
+        )
+        .unwrap();
+
+        assert_eq!(values, vec![0, 1, 0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn rejects_more_than_one_value_for_single_write() {
+        let error = ModbusTool::parse_write_values(ModbusFunction::WriteSingleRegister, "10, 20")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exactly one value"));
+    }
+
+    #[test]
+    fn rejects_invalid_register_and_coil_values() {
+        assert!(
+            ModbusTool::parse_write_values(ModbusFunction::WriteSingleRegister, "65536").is_err()
+        );
+        assert!(ModbusTool::parse_write_values(ModbusFunction::WriteSingleCoil, "2").is_err());
+    }
+
+    #[test]
+    fn rejects_write_limits_and_read_functions() {
+        let too_many_registers = vec!["0"; 124].join(",");
+        assert!(ModbusTool::parse_write_values(
+            ModbusFunction::WriteMultipleRegisters,
+            &too_many_registers,
+        )
+        .is_err());
+        assert!(ModbusTool::parse_write_values(ModbusFunction::ReadHolding, "1").is_err());
     }
 }
