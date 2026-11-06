@@ -1,5 +1,4 @@
 use super::utils::{bytes_to_hex_string, now_timestamp, parse_hex_string};
-use eframe::egui;
 use serialport::{self, SerialPort, SerialPortInfo};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
@@ -58,8 +57,8 @@ impl SerialTool {
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context) {
-        // receive message
+    pub fn receive(&mut self) -> bool {
+        let before = self.logs.len();
         if let Some(rx) = &self.rx {
             while let Ok(data) = rx.try_recv() {
                 let ts = now_timestamp();
@@ -72,200 +71,15 @@ impl SerialTool {
                 };
 
                 self.logs.push(format!("{} RX <- {}", ts, display));
-
-                ctx.request_repaint();
             }
         }
-        // bottom
-        egui::TopBottomPanel::bottom("serial_status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Status:");
-                ui.monospace(&self.status);
-            });
-        });
-
-        // center
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical(|ui| {
-                // config
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    self.ui_config(ui);
-                });
-
-                ui.add_space(6.0);
-
-                // send
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.label("Send");
-                    self.ui_sender(ui);
-                });
-
-                ui.add_space(6.0);
-
-                // log
-                let available_height = ui.available_height();
-
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_height(available_height);
-                    self.ui_logs(ui);
-                });
-            });
-        });
-    }
-
-    pub fn ui_config(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(ui.available_width());
-        // -------------------------------
-        // Refresh + Port
-        // -------------------------------
-        ui.horizontal(|ui| {
-            if ui
-                .button(egui::RichText::new("Refresh Ports").color(egui::Color32::BLUE))
-                .clicked()
-            {
-                self.available_ports = serialport::available_ports().unwrap_or_default();
-                self.selected_port = Some("Select Port".to_string());
-            }
-
-            egui::ComboBox::from_label("")
-                .width(220.0)
-                .selected_text(
-                    self.selected_port
-                        .clone()
-                        .unwrap_or_else(|| "Select Port".into()),
-                )
-                .show_ui(ui, |ui| {
-                    for p in &self.available_ports {
-                        if ui
-                            .selectable_label(
-                                self.selected_port.as_deref() == Some(&p.port_name),
-                                &p.port_name,
-                            )
-                            .clicked()
-                        {
-                            self.selected_port = Some(p.port_name.clone());
-                        }
-                    }
-                });
-        });
-
-        ui.add_space(6.0);
-
-        // -------------------------------
-        // Baud + DataBits + Parity + StopBits + FlowControl
-        // -------------------------------
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Baud rate:").strong());
-            ui.add(
-                egui::DragValue::new(&mut self.baud_rate)
-                    .speed(100)
-                    .range(1200..=921600),
-            );
-
-            ui.separator();
-
-            ui.label(egui::RichText::new("Data bits:").strong());
-            ui.radio_value(&mut self.data_bits, serialport::DataBits::Five, "5");
-            ui.radio_value(&mut self.data_bits, serialport::DataBits::Six, "6");
-            ui.radio_value(&mut self.data_bits, serialport::DataBits::Seven, "7");
-            ui.radio_value(&mut self.data_bits, serialport::DataBits::Eight, "8");
-
-            ui.separator();
-
-            ui.label(egui::RichText::new("Parity:").strong());
-            ui.radio_value(&mut self.parity, serialport::Parity::None, "None");
-            ui.radio_value(&mut self.parity, serialport::Parity::Odd, "Odd");
-            ui.radio_value(&mut self.parity, serialport::Parity::Even, "Even");
-
-            ui.separator();
-
-            ui.label(egui::RichText::new("Stop bits:").strong());
-            ui.radio_value(&mut self.stop_bits, serialport::StopBits::One, "1");
-            ui.radio_value(&mut self.stop_bits, serialport::StopBits::Two, "2");
-
-            ui.separator();
-
-            ui.label(egui::RichText::new("Flow control:").strong());
-            ui.radio_value(
-                &mut self.flow_control,
-                serialport::FlowControl::None,
-                "None",
-            );
-            ui.radio_value(
-                &mut self.flow_control,
-                serialport::FlowControl::Software,
-                "Software",
-            );
-            ui.radio_value(
-                &mut self.flow_control,
-                serialport::FlowControl::Hardware,
-                "Hardware",
-            );
-        });
-
-        ui.add_space(4.0);
-
-        // -------------------------------
-        // Connect / Disconnect
-        // -------------------------------
-        ui.horizontal(|ui| {
-            if ui
-                .button(egui::RichText::new("Connect").color(egui::Color32::BLUE))
-                .clicked()
-            {
-                self.connect();
-            }
-            if ui
-                .button(egui::RichText::new("Disconnect").color(egui::Color32::RED))
-                .clicked()
-            {
-                self.disconnect();
-            }
-        });
-    }
-
-    pub fn ui_sender(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(ui.available_width());
-
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut self.send_format, SendFormat::Hex, "HEX");
-            ui.radio_value(&mut self.send_format, SendFormat::Ascii, "ASCII");
-
-            ui.separator();
-
-            ui.add_sized(
-                [ui.available_width() - 140.0, 24.0],
-                egui::TextEdit::multiline(&mut self.input_text).hint_text(match self.send_format {
-                    SendFormat::Hex => "48 65 6C 6C 6F",
-                    SendFormat::Ascii => "Hello",
-                }),
-            );
-
-            if ui
-                .button(egui::RichText::new("Send").color(egui::Color32::BLUE))
-                .clicked()
-            {
-                self.send();
-            }
-        });
-    }
-
-    pub fn ui_logs(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(ui.available_width());
-
-        ui.label("Logs");
-
-        egui::ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                for log in &self.logs {
-                    ui.monospace(log);
-                }
-            });
+        self.logs.len() != before
     }
 
     pub fn connect(&mut self) {
+        if self.port.is_some() {
+            return;
+        }
         let Some(port_name) = &self.selected_port else {
             self.status = "No port selected".into();
             return;
@@ -275,6 +89,7 @@ impl SerialTool {
             .data_bits(self.data_bits)
             .parity(self.parity)
             .stop_bits(self.stop_bits)
+            .flow_control(self.flow_control)
             .timeout(Duration::from_millis(100))
             .open()
         {
@@ -283,6 +98,7 @@ impl SerialTool {
 
                 let (tx, rx) = mpsc::channel();
 
+                self.read_running = Arc::new(AtomicBool::new(false));
                 Self::start_read_thread(port.clone(), tx, self.read_running.clone());
 
                 self.port = Some(port);
@@ -386,5 +202,81 @@ impl SerialTool {
                 let _ = tx.send(frame);
             }
         });
+    }
+}
+
+impl Drop for SerialTool {
+    fn drop(&mut self) {
+        self.read_running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn exchanges_hex_and_ascii_over_a_virtual_serial_port() {
+        let (mut device, endpoint) =
+            serialport::TTYPort::pair().expect("create virtual serial pair");
+        device.set_timeout(Duration::from_secs(2)).unwrap();
+
+        let mut tool = SerialTool::new();
+        tool.selected_port = endpoint.name();
+        drop(endpoint);
+        // macOS PTYs do not support IOSSIOSPEED. Zero skips that ioctl.
+        #[cfg(target_os = "macos")]
+        {
+            tool.baud_rate = 0;
+        }
+        tool.connect();
+        assert!(tool.port.is_some(), "{}", tool.status);
+
+        for (format, input, sent, reply, logged) in [
+            (
+                SendFormat::Hex,
+                "00 A5 FF",
+                &[0, 0xA5, 0xFF][..],
+                &[0xDE, 0xAD][..],
+                "DE AD",
+            ),
+            (
+                SendFormat::Ascii,
+                "PING",
+                &b"PING"[..],
+                &b"OK\r\n"[..],
+                r"OK\r\n",
+            ),
+        ] {
+            tool.send_format = format;
+            tool.input_text = input.into();
+            tool.send();
+
+            let mut actual = vec![0; sent.len()];
+            device.read_exact(&mut actual).unwrap();
+            assert_eq!(actual, sent);
+            assert!(tool
+                .logs
+                .last()
+                .unwrap()
+                .ends_with(&format!("TX -> {input}")));
+
+            device.write_all(reply).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !tool.receive() {
+                assert!(Instant::now() < deadline, "no reply received for {input}");
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(tool
+                .logs
+                .last()
+                .unwrap()
+                .ends_with(&format!("RX <- {logged}")));
+        }
+
+        tool.disconnect();
+        assert!(tool.port.is_none());
+        assert_eq!(tool.status, "Disconnected");
     }
 }
