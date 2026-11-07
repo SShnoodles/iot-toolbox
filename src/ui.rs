@@ -16,7 +16,6 @@ use gpui_kit::{
     *,
 };
 use serialport::{DataBits, FlowControl, Parity, StopBits};
-use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -36,19 +35,22 @@ pub struct Toolbox {
     address: Entity<InputState>,
     quantity: Entity<InputState>,
     write: Entity<InputState>,
-    serial_scroll: ScrollHandle,
+    serial_log: ListState,
+    _device_events: Task<()>,
     update: UpdateState,
     show_update_status: bool,
 }
 
 impl Toolbox {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let serial = SerialTool::new();
-        let modbus = ModbusTool::new();
+        // One pending wake is enough: each wake drains both device queues.
+        let (wake, events) = async_channel::bounded(1);
+        let serial = SerialTool::new(wake.clone());
+        let modbus = ModbusTool::new(wake);
         let mut input =
             |value: String| cx.new(|cx| InputState::new(window, cx).default_value(value));
         let baud = input(serial.baud_rate.to_string());
-        let ip = input(modbus.tcp_ip.clone());
+        let ip = input(modbus.tcp_ip.to_string());
         let port = input(modbus.tcp_port.to_string());
         let slave = input(modbus.slave_id.to_string());
         let address = input(modbus.address.to_string());
@@ -60,30 +62,29 @@ impl Toolbox {
                 .placeholder("48 65 6C 6C 6F / Hello")
         });
 
-        cx.spawn(async |view, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(50))
-                .await;
-            if view
-                .update(cx, |this, cx| {
-                    let serial_changed = this.serial.receive();
-                    let modbus_changed = this.modbus.receive();
-                    if serial_changed {
-                        this.serial_scroll.scroll_to_bottom();
-                    }
-                    if (this.tab == Tab::Serial && serial_changed)
-                        || (this.tab == Tab::Modbus && modbus_changed)
-                    {
-                        cx.notify();
-                    }
-                })
-                .is_err()
-            {
-                break;
+        let device_events = cx.spawn(async move |view, cx| {
+            while events.recv().await.is_ok() {
+                if view
+                    .update(cx, |this, cx| {
+                        let previous_log_count = this.serial.log_count;
+                        let serial_changed = this.serial.receive();
+                        this.sync_serial_log(previous_log_count);
+                        let modbus_changed = this.modbus.receive();
+                        if (this.tab == Tab::Serial && serial_changed)
+                            || (this.tab == Tab::Modbus && modbus_changed)
+                        {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
-        })
-        .detach();
+        });
 
+        let serial_log = ListState::new(0, ListAlignment::Top, px(64.));
+        serial_log.set_follow_mode(FollowMode::Tail);
         Self::spawn_update_check(cx);
         Self {
             update: UpdateState::Checking,
@@ -99,7 +100,8 @@ impl Toolbox {
             address,
             quantity,
             write,
-            serial_scroll: ScrollHandle::new(),
+            serial_log,
+            _device_events: device_events,
         }
     }
 
@@ -172,9 +174,23 @@ impl Toolbox {
         }
     }
 
+    fn sync_serial_log(&self, previous_log_count: usize) {
+        let appended = self.serial.log_count - previous_log_count;
+        if appended == 0 {
+            return;
+        }
+        let previous_len = self.serial_log.item_count();
+        let retained = self.serial.logs.len() - appended;
+        let evicted = previous_len - retained;
+        if evicted > 0 {
+            self.serial_log.splice(0..evicted, 0);
+        }
+        self.serial_log.splice(retained..retained, appended);
+    }
+
     fn serial(&self, cx: &Context<Self>) -> Div {
         let serial = &self.serial;
-        let connected = serial.port.is_some();
+        let view = cx.entity().downgrade();
         let ports = serial
             .available_ports
             .iter()
@@ -207,7 +223,7 @@ impl Toolbox {
                                     this.serial.selected_port = None;
                                 }
                             }))
-                            .child(number("Baud rate", &self.baud, cx))
+                            .child(number("Baud rate", &self.baud, false, cx))
                             .child(field(
                                 Language::current(cx).text("Data bits"),
                                 choice(
@@ -279,11 +295,11 @@ impl Toolbox {
                                     }
                                 })
                                 .primary()
-                                .disabled(connected),
+                                .disabled(serial.has_session()),
                             )
                             .child(
                                 action("Disconnect", cx, |this, _| this.serial.disconnect())
-                                    .disabled(!connected),
+                                    .disabled(!serial.can_disconnect()),
                             ),
                     ),
             )
@@ -304,29 +320,36 @@ impl Toolbox {
                                 action("Send", cx, |this, cx| {
                                     this.serial.input_text =
                                         this.message.read(cx).value().to_string();
+                                    let previous_log_count = this.serial.log_count;
                                     this.serial.send();
-                                    this.serial_scroll.scroll_to_bottom();
+                                    this.sync_serial_log(previous_log_count);
                                 })
                                 .primary(),
                             ),
                     ),
             )
-            .child(
-                panel("Serial log", cx).child(
+            .child(panel("Serial log", cx).child(if serial.logs.is_empty() {
+                div()
+                    .h(px(190.))
+                    .child(Language::current(cx).text("No serial traffic"))
+                    .into_any_element()
+            } else {
+                list(self.serial_log.clone(), move |index, _, cx| {
+                    let Some(view) = view.upgrade() else {
+                        return div().into_any_element();
+                    };
+                    let logs = &view.read(cx).serial.logs;
+                    let line = Language::current(cx).message(&logs[index]).into_owned();
                     div()
-                        .id("serial-log")
-                        .h(px(190.))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.serial_scroll)
                         .font_family(cx.theme().mono_font_family.clone())
-                        .when(serial.logs.is_empty(), |d| {
-                            d.child(Language::current(cx).text("No serial traffic"))
-                        })
-                        .children(serial.logs.iter().cloned().map(|line| {
-                            div().child(Language::current(cx).message(&line).into_owned())
-                        })),
-                ),
-            )
+                        .whitespace_normal()
+                        .child(line)
+                        .into_any_element()
+                })
+                .w_full()
+                .h(px(190.))
+                .into_any_element()
+            }))
     }
 
     fn modbus(&self, cx: &Context<Self>) -> Div {
@@ -334,6 +357,7 @@ impl Toolbox {
         let language = Language::current(cx);
         let mb = &self.modbus;
         let polling = mb.is_polling();
+        let request_active = polling || mb.is_writing();
         let functions = [
             ReadCoils,
             ReadDiscrete,
@@ -353,15 +377,17 @@ impl Toolbox {
                     row()
                         .child(field(
                             Language::current(cx).text("IP address"),
-                            div().w(px(200.)).child(Input::new(&self.ip).small()),
+                            div()
+                                .w(px(200.))
+                                .child(Input::new(&self.ip).small().disabled(request_active)),
                         ))
-                        .child(number("Port", &self.port, cx)),
+                        .child(number("Port", &self.port, request_active, cx)),
                 ),
             )
             .child(
                 panel("Request", cx).child(
                     row()
-                        .child(number("Slave ID", &self.slave, cx))
+                        .child(number("Slave ID", &self.slave, request_active, cx))
                         .child(field(
                             Language::current(cx).text("Function"),
                             choice(
@@ -378,9 +404,9 @@ impl Toolbox {
                                 },
                             ),
                         ))
-                        .child(number("Address", &self.address, cx))
+                        .child(number("Address", &self.address, request_active, cx))
                         .when(mb.function.is_read(), |d| {
-                            d.child(number("Quantity", &self.quantity, cx))
+                            d.child(number("Quantity", &self.quantity, request_active, cx))
                         }),
                 ),
             )
@@ -431,37 +457,23 @@ impl Toolbox {
                             .font_weight(FontWeight::SEMIBOLD)
                             .bg(cx.theme().muted),
                         )
-                        .children(
-                            ModbusTool::build_rows(
-                                mb.address,
-                                &mb.data,
-                                mb.view_rows,
-                                mb.display_format,
-                            )
-                            .into_iter()
-                            .map(|r| {
-                                let raw = r
-                                    .raw
-                                    .iter()
-                                    .map(|v| format!("{v:04X}"))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                register_row([
-                                    r.index.to_string(),
-                                    r.address.to_string(),
-                                    raw,
-                                    r.value,
-                                ])
+                        .children(mb.rows().into_iter().map(|r| {
+                            let raw = r
+                                .raw
+                                .iter()
+                                .map(|v| format!("{v:04X}"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            register_row([r.index.to_string(), r.address.to_string(), raw, r.value])
                                 .border_b_1()
                                 .border_color(cx.theme().border)
-                            }),
-                        ),
+                        })),
                 )
             })
             .when(!mb.function.is_read(), |d| {
                 d.child(
                     panel("Write values", cx)
-                        .child(Input::new(&self.write).small())
+                        .child(Input::new(&self.write).small().disabled(request_active))
                         .child(language.text(match mb.function {
                             WriteSingleCoil => "Enter one coil value (0/1, off/on, or false/true).",
                             WriteSingleRegister => {
@@ -500,6 +512,15 @@ impl Toolbox {
     }
 
     fn read_modbus_fields(&mut self, cx: &App) -> Result<(), String> {
+        let value = self.ip.read(cx).value();
+        let ip = value.trim();
+        let ip = ip
+            .strip_prefix('[')
+            .and_then(|ip| ip.strip_suffix(']'))
+            .unwrap_or(ip);
+        let ip = ip
+            .parse()
+            .map_err(|_| "Enter a valid IPv4 or IPv6 address".to_owned())?;
         let mb = &mut self.modbus;
         let port = read_number(&self.port, 1, u16::MAX, "Port", cx)?;
         let slave = read_number(&self.slave, 1, 247, "Slave ID", cx)?;
@@ -513,7 +534,7 @@ impl Toolbox {
                 cx,
             )?;
         }
-        mb.tcp_ip = self.ip.read(cx).value().trim().to_owned();
+        mb.tcp_ip = ip;
         mb.tcp_port = port;
         mb.slave_id = slave;
         mb.address = address;
@@ -637,10 +658,12 @@ fn field(label: &'static str, control: impl IntoElement) -> Div {
         .child(control)
 }
 
-fn number(label: &'static str, state: &Entity<InputState>, cx: &App) -> Div {
+fn number(label: &'static str, state: &Entity<InputState>, disabled: bool, cx: &App) -> Div {
     field(
         Language::current(cx).text(label),
-        div().w(px(82.)).child(Input::new(state).small()),
+        div()
+            .w(px(82.))
+            .child(Input::new(state).small().disabled(disabled)),
     )
 }
 

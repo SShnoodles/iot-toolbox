@@ -1,9 +1,13 @@
 use super::display::DisplayFormat;
 use anyhow::{bail, Error, Result};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 use tokio_modbus::prelude::*;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -55,8 +59,14 @@ pub struct ModbusRow {
     pub value: String,
 }
 
+struct ReadResult {
+    function: ModbusFunction,
+    address: u16,
+    data: Vec<u16>,
+}
+
 pub struct ModbusTool {
-    pub tcp_ip: String,
+    pub tcp_ip: IpAddr,
     pub tcp_port: u16,
 
     pub slave_id: u8,
@@ -68,20 +78,21 @@ pub struct ModbusTool {
     pub view_rows: usize,
     pub display_format: DisplayFormat,
 
-    pub data: Vec<u16>,
+    result: Option<ReadResult>,
 
-    pub rx: Option<Receiver<Vec<u16>>>,
+    rx: Option<Receiver<ReadResult>>,
     pub rt: tokio::runtime::Runtime,
     poll_task: Option<JoinHandle<()>>,
     pub status_rx: Option<Receiver<String>>,
 
     pub status: String,
+    wake: async_channel::Sender<()>,
 }
 
 impl ModbusTool {
-    pub fn new() -> Self {
+    pub fn new(wake: async_channel::Sender<()>) -> Self {
         Self {
-            tcp_ip: "127.0.0.1".to_string(),
+            tcp_ip: Ipv4Addr::LOCALHOST.into(),
             tcp_port: 502,
             slave_id: 1,
             function: ModbusFunction::ReadHolding,
@@ -92,7 +103,7 @@ impl ModbusTool {
             view_rows: 10,
             display_format: DisplayFormat::Signed,
 
-            data: Vec::new(),
+            result: None,
 
             rx: None,
             rt: tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"),
@@ -100,6 +111,7 @@ impl ModbusTool {
             status_rx: None,
 
             status: "Disconnected".to_string(),
+            wake,
         }
     }
 
@@ -107,7 +119,7 @@ impl ModbusTool {
         let mut changed = false;
         if let Some(rx) = &self.rx {
             while let Ok(data) = rx.try_recv() {
-                self.data = data;
+                self.result = Some(data);
                 changed = true;
             }
         }
@@ -129,37 +141,54 @@ impl ModbusTool {
             return;
         }
 
-        let (data_tx, data_rx) = channel::<Vec<u16>>();
+        let qty = self.quantity.clamp(1, self.function.max_read_quantity());
+        if !address_range_fits(self.address, usize::from(qty)) {
+            self.status = "Request exceeds address 65535".into();
+            return;
+        }
+
+        let (data_tx, data_rx) = channel::<ReadResult>();
         let (status_tx, status_rx) = channel::<String>();
 
         self.rx = Some(data_rx);
-        self.data.clear();
+        self.result = None;
         self.status_rx = Some(status_rx);
 
-        let ip = self.tcp_ip.clone();
+        let ip = self.tcp_ip;
         let port = self.tcp_port;
         let slave = self.slave_id;
         let addr = self.address;
         let function = self.function;
-        let qty = self.quantity.clamp(1, function.max_read_quantity());
         self.quantity = qty;
 
         self.status = "Auto Poll started...".into();
 
+        let wake = self.wake.clone();
         self.poll_task = Some(self.rt.spawn(async move {
             loop {
-                match Self::modbus_read_by_function(ip.clone(), port, slave, function, addr, qty)
-                    .await
+                match timeout(
+                    REQUEST_TIMEOUT,
+                    Self::modbus_read_by_function(ip, port, slave, function, addr, qty),
+                )
+                .await
                 {
-                    Ok(data) => {
-                        let _ = data_tx.send(data);
+                    Ok(Ok(data)) => {
+                        let _ = data_tx.send(ReadResult {
+                            function,
+                            address: addr,
+                            data,
+                        });
                         let _ = status_tx.send("Auto Poll running".into());
                     }
-                    Err(e) => {
-                        let _ = status_tx.send(format!("Read error: {}", e));
+                    Ok(Err(e)) => {
+                        let _ = status_tx.send(format!("Read error: {e}"));
+                    }
+                    Err(_) => {
+                        let _ = status_tx.send("Read timed out".into());
                     }
                 }
 
+                let _ = wake.try_send(());
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }));
@@ -192,10 +221,15 @@ impl ModbusTool {
             }
         };
 
+        if !address_range_fits(self.address, values.len()) {
+            self.status = "Request exceeds address 65535".into();
+            return;
+        }
+
         let (status_tx, status_rx) = channel::<String>();
         self.status_rx = Some(status_rx);
 
-        let ip = self.tcp_ip.clone();
+        let ip = self.tcp_ip;
         let port = self.tcp_port;
         let slave = self.slave_id;
         let function = self.function;
@@ -204,30 +238,34 @@ impl ModbusTool {
 
         self.status = format!("Sending {}...", function.label());
 
+        let wake = self.wake.clone();
         self.rt.spawn(async move {
-            let status =
-                match Self::modbus_write_by_function(ip, port, slave, function, address, values)
-                    .await
-                {
-                    Ok(()) => format!(
-                        "Write successful: {} value(s) at address {}",
-                        value_count, address
-                    ),
-                    Err(error) => format!("Write error: {error}"),
-                };
+            let status = match timeout(
+                REQUEST_TIMEOUT,
+                Self::modbus_write_by_function(ip, port, slave, function, address, values),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    format!("Write successful: {value_count} value(s) at address {address}",)
+                }
+                Ok(Err(error)) => format!("Write error: {error}"),
+                Err(_) => "Write timed out; device outcome unknown".into(),
+            };
             let _ = status_tx.send(status);
+            let _ = wake.try_send(());
         });
     }
 
     async fn modbus_read_by_function(
-        ip: String,
+        ip: IpAddr,
         port: u16,
         slave_id: u8,
         function: ModbusFunction,
         address: u16,
         quantity: u16,
     ) -> Result<Vec<u16>, Error> {
-        let socket_addr: SocketAddr = format!("{}:{}", ip, port).parse()?;
+        let socket_addr = SocketAddr::new(ip, port);
 
         let mut ctx = tcp::connect(socket_addr).await?;
         ctx.set_slave(Slave(slave_id));
@@ -260,14 +298,14 @@ impl ModbusTool {
     }
 
     async fn modbus_write_by_function(
-        ip: String,
+        ip: IpAddr,
         port: u16,
         slave_id: u8,
         function: ModbusFunction,
         address: u16,
         values: Vec<u16>,
     ) -> Result<(), Error> {
-        let socket_addr: SocketAddr = format!("{}:{}", ip, port).parse()?;
+        let socket_addr = SocketAddr::new(ip, port);
 
         let mut ctx = tcp::connect(socket_addr).await?;
         ctx.set_slave(Slave(slave_id));
@@ -354,7 +392,18 @@ impl ModbusTool {
             .collect()
     }
 
-    pub fn build_rows(
+    pub fn rows(&self) -> Vec<ModbusRow> {
+        let (address, data) = self
+            .result
+            .as_ref()
+            .filter(|result| result.function == self.function)
+            .map_or((self.address, &[][..]), |result| {
+                (result.address, result.data.as_slice())
+            });
+        Self::build_rows(address, data, self.view_rows, self.display_format)
+    }
+
+    fn build_rows(
         start_addr: u16,
         regs: &[u16],
         rows: usize,
@@ -363,25 +412,124 @@ impl ModbusTool {
         let reg_per_row = format.register_count();
 
         (0..rows)
-            .map(|i| {
-                let addr = start_addr.wrapping_add((i * reg_per_row) as u16);
+            .map_while(|i| {
+                let addr = start_addr.checked_add((i * reg_per_row) as u16)?;
                 let start = i * reg_per_row;
                 let raw = regs.get(start..start + reg_per_row).unwrap_or(&[]).to_vec();
 
-                ModbusRow {
+                Some(ModbusRow {
                     index: i,
                     address: addr,
                     value: format.format(&raw),
                     raw,
-                }
+                })
             })
             .collect()
     }
 }
 
+fn address_range_fits(start: u16, count: usize) -> bool {
+    count <= usize::from(u16::MAX - start) + 1
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ModbusFunction, ModbusTool};
+    use super::{ModbusFunction, ModbusTool, ReadResult};
+
+    #[test]
+    fn rejects_read_and_write_ranges_past_the_last_address() {
+        let mut tool = ModbusTool::new(async_channel::bounded(1).0);
+        tool.address = u16::MAX;
+        tool.quantity = 2;
+        tool.start_auto_poll();
+        assert!(!tool.is_polling());
+        assert_eq!(tool.status, "Request exceeds address 65535");
+
+        tool.function = ModbusFunction::WriteMultipleRegisters;
+        tool.write_values = "1, 2".into();
+        tool.send_write();
+        assert!(!tool.is_writing());
+        assert_eq!(tool.status, "Request exceeds address 65535");
+        assert!(super::address_range_fits(u16::MAX, 1));
+    }
+
+    #[test]
+    #[ignore = "requires permission to bind a local TCP socket"]
+    fn ipv6_modbus_write_recovers_after_a_silent_peer() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("[::1]:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (wake, events) = async_channel::bounded(1);
+        let mut tool = ModbusTool::new(wake);
+        let endpoint = listener.local_addr().unwrap();
+        tool.tcp_ip = endpoint.ip();
+        tool.tcp_port = endpoint.port();
+        tool.function = ModbusFunction::WriteSingleRegister;
+        tool.send_write();
+        assert!(tool.is_writing());
+
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let accept = || loop {
+            match listener.accept() {
+                Ok((peer, _)) => {
+                    peer.set_nonblocking(false).unwrap();
+                    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    break peer;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "write did not connect");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        let mut peer = accept();
+        let mut request = [0; 12];
+        peer.read_exact(&mut request).unwrap();
+        assert_eq!(request[7], 6);
+
+        // Keep the connection open without returning a Modbus response.
+        let wait_for_completion = |tool: &mut ModbusTool| {
+            while tool.is_writing() {
+                assert!(Instant::now() < deadline, "write stayed pending");
+                thread::sleep(Duration::from_millis(10));
+                if events.try_recv().is_ok() {
+                    tool.receive();
+                }
+            }
+        };
+        wait_for_completion(&mut tool);
+        assert_eq!(tool.status, "Write timed out; device outcome unknown");
+        drop(peer);
+
+        tool.send_write();
+        let mut peer = accept();
+        peer.read_exact(&mut request).unwrap();
+        peer.write_all(&request).unwrap();
+        wait_for_completion(&mut tool);
+        assert_eq!(tool.status, "Write successful: 1 value(s) at address 0");
+    }
+
+    #[test]
+    fn read_rows_keep_the_address_of_the_request_that_produced_them() {
+        let mut tool = ModbusTool::new(async_channel::bounded(1).0);
+        tool.result = Some(ReadResult {
+            function: ModbusFunction::ReadHolding,
+            address: 100,
+            data: vec![42],
+        });
+        tool.address = 200;
+        let rows = tool.rows();
+        assert_eq!(rows[0].address, 100);
+        assert_eq!(rows[0].raw, [42]);
+
+        tool.function = ModbusFunction::ReadInput;
+        assert!(tool.rows()[0].raw.is_empty());
+    }
 
     #[test]
     fn parses_decimal_and_hex_register_values() {
