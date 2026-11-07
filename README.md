@@ -2,8 +2,9 @@
 
 ![IoT Toolbox logo](packaging/icons/iot-toolbox-256.png)
 
-**Cross-platform, lightweight IoT debugging tool**  
-Built with **Rust + egui** — runs natively on Windows, macOS and Linux  
+**Cross-platform, lightweight IoT debugging tool**
+
+Built with **Rust + GPUI Kit** for Windows, macOS and Linux.
 
 👉 **[Download latest release](https://github.com/SShnoodles/iot-toolbox/releases)** (when available)  
 👉 Or build it yourself in ~2 minutes
@@ -15,21 +16,18 @@ Built with **Rust + egui** — runs natively on Windows, macOS and Linux
 - [x] Modbus Read
 - [x] Modbus Write (function codes 05, 06, 15, and 16)
 
-## In action
-
-![iot toolbox1](https://s1.imagehub.cc/images/2026/01/15/a68f865bb87bc5a7e6f83bf99d4348e2.png)
 ## Build from source
 
 ```bash
-# 1. Make sure you have recent Rust (1.89+ recommended)
+# 1. Make sure you have Rust 1.98 or later
 rustup update
 
 # 2. Linux only — install native build dependencies (Ubuntu/Debian)
 sudo apt-get update
-sudo apt-get install libgl1-mesa-dev libudev-dev libwayland-dev \
-  libx11-xcb-dev libxkbcommon-dev pkg-config
+sudo apt-get install clang libfontconfig-dev libudev-dev libwayland-dev \
+  libx11-xcb-dev libxkbcommon-x11-dev libssl-dev libzstd-dev libvulkan1 pkg-config
 
-# 3. Windows only — add the msvc target (only needed once)
+# 3. Windows only — install CMake and add the MSVC target
 rustup target add x86_64-pc-windows-msvc
 
 # 4. Build release version
@@ -37,7 +35,16 @@ cargo build --release
 cargo build --release --target x86_64-pc-windows-msvc
 ```
 
+GPUI Kit targets macOS 15 or later and Windows 10 or later. Linux needs a graphical
+Wayland or X11 session and a working Vulkan driver. See the
+[GPUI Kit installation guide](https://gpui-kit.com/docs/installation/) for platform setup.
+
 ## Release packages
+
+IoT Toolbox checks for a newer stable GitHub release at startup. Use
+**Check for updates** in the toolbar to check again. **Get update** opens
+the matching macOS DMG or the release page for Windows and Linux. Install
+the update using the package format you already use.
 
 The `Build release packages` GitHub Actions workflow creates these desktop
 packages:
@@ -79,8 +86,3 @@ notarized, so Gatekeeper may ask for confirmation on first launch.
 
 ## License
 MIT License
-
----
-Made with ❤️ and egui
-
-Thanks to [emilk/egui](https://github.com/emilk/egui) for the excellent immediate-mode GUI library!

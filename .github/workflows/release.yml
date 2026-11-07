@@ -34,11 +34,15 @@ jobs:
             file \
             git \
             jq \
-            libgl1-mesa-dev \
+            clang \
+            libfontconfig-dev \
+            libssl-dev \
+            libzstd-dev \
+            libvulkan1 \
             libudev-dev \
             libwayland-dev \
             libx11-xcb-dev \
-            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             pkg-config
 
       - name: Check out repository
@@ -105,7 +109,7 @@ jobs:
           Priority: optional
           Architecture: amd64
           Maintainer: IoT Toolbox contributors
-          Depends: libgl1, libudev1, libwayland-client0, libx11-6, libxcb1, libxkbcommon0
+          Depends: libfontconfig1, libudev1, libvulkan1, libwayland-client0, libx11-6, libxcb1, libxkbcommon0, libxkbcommon-x11-0
           Description: Cross-platform IoT debugging tool
            A lightweight serial and Modbus debugging GUI built with Rust and egui.
           EOF
@@ -226,7 +230,7 @@ jobs:
             artifact_arch: x86_64
     runs-on: ${{ matrix.runner }}
     env:
-      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
 
     steps:
       - name: Check out repository
