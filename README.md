@@ -60,21 +60,21 @@ packages:
 - Push a version tag to build the packages and attach them to a GitHub Release:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 Install the downloaded Debian package with:
 
 ```bash
-sudo apt install ./iot-toolbox_0.1.3_amd64.deb
+sudo apt install ./iot-toolbox_0.2.0_amd64.deb
 ```
 
 Or run the AppImage without installing it:
 
 ```bash
-chmod +x iot-toolbox-0.1.3-linux-x86_64.AppImage
-./iot-toolbox-0.1.3-linux-x86_64.AppImage
+chmod +x iot-toolbox-0.2.0-linux-x86_64.AppImage
+./iot-toolbox-0.2.0-linux-x86_64.AppImage
 ```
 
 On Windows, extract the portable `.zip` or run the `-setup.exe` installer.
